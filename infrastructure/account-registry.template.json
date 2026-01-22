@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy this file to account-registry.json and fill in your actual account IDs",
+  "accounts": [
+    {
+      "id": "111111111111",
+      "name": "Central Operations",
+      "environment": "operations",
+      "role": "central"
+    },
+    {
+      "id": "222222222222",
+      "name": "Production",
+      "environment": "production",
+      "role": "workload"
+    },
+    {
+      "id": "333333333333",
+      "name": "Staging",
+      "environment": "staging",
+      "role": "workload"
+    },
+    {
+      "id": "444444444444",
+      "name": "Development",
+      "environment": "development",
+      "role": "workload"
+    }
+  ]
+}
