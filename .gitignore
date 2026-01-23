@@ -30,6 +30,9 @@ env/
 dist/
 build/
 *.egg
+.pytest_cache/
+.coverage
+htmlcov/
 
 # IDE
 .idea/
