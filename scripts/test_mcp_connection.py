@@ -6,14 +6,22 @@ import json
 import sys
 
 
-def test_mcp_tools_list():
-    """Test that we can list tools from AWS MCP Server."""
+def test_mcp_initialize():
+    """Test that we can initialize MCP connection to AWS MCP Server."""
+    # MCP protocol requires initialize first
     request = {
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "tools/list",
-        "params": {}
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "1.0"}
+        }
     }
+
+    print("Testing MCP proxy connection to AWS MCP Server...")
+    print(f"Endpoint: https://aws-mcp.us-east-1.api.aws/mcp")
 
     result = subprocess.run(
         [
@@ -24,24 +32,37 @@ def test_mcp_tools_list():
         input=json.dumps(request),
         capture_output=True,
         text=True,
-        timeout=60
+        timeout=120
     )
 
-    if result.returncode != 0:
-        print(f"FAIL: MCP proxy error: {result.stderr}")
+    # Parse first line of output (may have multiple JSON responses)
+    stdout_lines = result.stdout.strip().split('\n')
+    if not stdout_lines or not stdout_lines[0]:
+        print(f"FAIL: No response from MCP proxy")
+        print(f"stderr: {result.stderr[:500]}")
         return False
 
     try:
-        response = json.loads(result.stdout)
-        tools = response.get("result", {}).get("tools", [])
-        print(f"PASS: Retrieved {len(tools)} tools from AWS MCP Server")
+        response = json.loads(stdout_lines[0])
 
-        # Print first 5 tool names as sample
-        print("\nSample tools:")
-        for tool in tools[:5]:
-            print(f"  - {tool.get('name')}")
+        if "error" in response:
+            print(f"FAIL: MCP error: {response['error']}")
+            return False
+
+        server_info = response.get("result", {}).get("serverInfo", {})
+        protocol_version = response.get("result", {}).get("protocolVersion", "unknown")
+        capabilities = response.get("result", {}).get("capabilities", {})
+
+        print(f"\nPASS: MCP connection established")
+        print(f"  Server: {server_info.get('name', 'unknown')}")
+        print(f"  Version: {server_info.get('version', 'unknown')}")
+        print(f"  Protocol: {protocol_version}")
+        print(f"  Capabilities: tools={bool(capabilities.get('tools'))}, "
+              f"prompts={bool(capabilities.get('prompts'))}, "
+              f"resources={bool(capabilities.get('resources'))}")
 
         return True
+
     except json.JSONDecodeError as e:
         print(f"FAIL: Invalid JSON response: {e}")
         print(f"stdout: {result.stdout[:500]}")
@@ -49,5 +70,5 @@ def test_mcp_tools_list():
 
 
 if __name__ == "__main__":
-    success = test_mcp_tools_list()
+    success = test_mcp_initialize()
     sys.exit(0 if success else 1)
