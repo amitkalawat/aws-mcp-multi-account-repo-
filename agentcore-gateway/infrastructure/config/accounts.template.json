@@ -1,0 +1,22 @@
+{
+  "accounts": [
+    {
+      "id": "111111111111",
+      "name": "Central Operations",
+      "environment": "ops",
+      "role": "central"
+    },
+    {
+      "id": "222222222222",
+      "name": "Production",
+      "environment": "prod",
+      "role": "workload"
+    },
+    {
+      "id": "333333333333",
+      "name": "Staging",
+      "environment": "staging",
+      "role": "workload"
+    }
+  ]
+}

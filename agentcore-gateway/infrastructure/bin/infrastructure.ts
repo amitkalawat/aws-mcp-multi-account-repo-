@@ -1,20 +1,44 @@
 #!/usr/bin/env node
+import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import { InfrastructureStack } from '../lib/infrastructure-stack';
+import { CognitoStack } from '../lib/cognito-stack';
+import { LambdaStack } from '../lib/lambda-stack';
+import { RolesStack } from '../lib/roles-stack';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const app = new cdk.App();
-new InfrastructureStack(app, 'InfrastructureStack', {
-  /* If you don't specify 'env', this stack will be environment-agnostic.
-   * Account/Region-dependent features and context lookups will not work,
-   * but a single synthesized template can be deployed anywhere. */
 
-  /* Uncomment the next line to specialize this stack for the AWS Account
-   * and Region that are implied by the current CLI configuration. */
-  // env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+const environment = app.node.tryGetContext('environment') || 'dev';
+const region = app.node.tryGetContext('region') || 'us-east-1';
 
-  /* Uncomment the next line if you know exactly what Account and Region you
-   * want to deploy the stack to. */
-  // env: { account: '123456789012', region: 'us-east-1' },
+// Load account configuration
+const configPath = path.join(__dirname, '../config/accounts.json');
+let targetAccounts = '[]';
+if (fs.existsSync(configPath)) {
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  targetAccounts = JSON.stringify(config.accounts.filter((a: any) => a.role !== 'central'));
+}
 
-  /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
+const env = { region };
+
+// Cognito Stack
+const cognitoStack = new CognitoStack(app, `CentralOps-Cognito-${environment}`, {
+  environment,
+  env,
 });
+
+// Lambda Stack
+const lambdaStack = new LambdaStack(app, `CentralOps-Lambda-${environment}`, {
+  environment,
+  targetAccounts,
+  env,
+});
+
+// Roles Stack (depends on Lambda)
+const rolesStack = new RolesStack(app, `CentralOps-Roles-${environment}`, {
+  environment,
+  bridgeLambda: lambdaStack.bridgeLambda,
+  env,
+});
+rolesStack.addDependency(lambdaStack);
