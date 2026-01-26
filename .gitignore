@@ -14,8 +14,9 @@ credentials.json
 *.pem
 *.key
 
-# Account registry with real account IDs (use template instead)
-infrastructure/account-registry.json
+# Account registries with real IDs
+direct-proxy/infrastructure/account-registry.json
+agentcore-gateway/infrastructure/account-registry.json
 
 # Python
 __pycache__/
@@ -61,3 +62,9 @@ node_modules/
 tmp/
 temp/
 *.tmp
+
+# Lambda deployment packages
+agentcore-gateway/lambda/*.zip
+
+# Runtime deployment
+agentcore-gateway/.bedrock_agentcore/
