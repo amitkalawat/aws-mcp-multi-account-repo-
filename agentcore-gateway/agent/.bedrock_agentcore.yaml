@@ -1,0 +1,33 @@
+# AgentCore Runtime Configuration for CentralOpsAgent
+# This config tells AgentCore how to run the agent and authenticate requests
+
+name: central-ops-agent
+entrypoint: central_ops_agent.py
+
+runtime:
+  # IAM role for the agent to assume when running
+  execution_role: ${RUNTIME_ROLE_ARN}  # Set during deployment
+
+  # Inbound JWT authorization using Cognito
+  authorizer:
+    type: customJWTAuthorizer
+    # Cognito User Pool OIDC discovery URL
+    discovery_url: ${COGNITO_DISCOVERY_URL}  # Set during deployment (e.g., https://cognito-idp.{region}.amazonaws.com/{user-pool-id}/.well-known/openid-configuration)
+    # Audiences that are allowed to call this agent
+    allowed_audiences:
+      - central-ops-client
+    # Cognito client IDs that can authenticate
+    allowed_clients:
+      - ${COGNITO_CLIENT_ID}  # Set during deployment
+
+  # Allow Authorization header to pass through to the agent
+  # This is needed so the agent can extract tokens for downstream calls
+  request_header_allowlist:
+    - Authorization
+
+# Gateway configuration for routing requests
+gateway:
+  # Target name matches the Lambda function handling bridge requests
+  target_name: bridge-lambda
+  # Gateway ID created by CDK infrastructure
+  gateway_id: ${GATEWAY_ID}  # Set during deployment
