@@ -111,15 +111,15 @@ agentcore-gateway/
 │   └── requirements.txt
 ├── infrastructure/
 │   ├── bin/infrastructure.ts        # CDK app entry point
-│   ├── lib/
-│   │   ├── cognito-stack.ts         # Cognito User Pool
-│   │   ├── lambda-stack.ts          # Bridge Lambda function
-│   │   ├── roles-stack.ts           # Gateway and Runtime IAM roles
-│   │   ├── member-account-stack.ts  # Member account target role
-│   │   ├── ecr-stack.ts             # ECR repository for agent container
-│   │   ├── gateway-stack.ts         # AgentCore Gateway and Lambda target
-│   │   └── runtime-stack.ts         # AgentCore Runtime and endpoint
-│   └── config/accounts.json         # Account configuration (gitignored)
+│   └── lib/
+│       ├── cognito-stack.ts         # Cognito User Pool
+│       ├── dynamodb-stack.ts        # DynamoDB table for account mappings
+│       ├── lambda-stack.ts          # Bridge Lambda function
+│       ├── roles-stack.ts           # Gateway and Runtime IAM roles
+│       ├── member-account-stack.ts  # Member account target role
+│       ├── ecr-stack.ts             # ECR repository for agent container
+│       ├── gateway-stack.ts         # AgentCore Gateway and Lambda target
+│       └── runtime-stack.ts         # AgentCore Runtime and endpoint
 ├── lambda/
 │   └── handler.py                   # Bridge Lambda code
 └── tests/
@@ -131,8 +131,14 @@ agentcore-gateway/
 
 **File: `lambda/handler.py`**
 
+The Lambda is a simple bridge that:
+1. Receives `query` requests with `account_id`, `tool_name`, and `arguments`
+2. Assumes the target role in the specified account
+3. Calls AWS MCP Server with the assumed credentials
+
+Account management is handled by the agent via DynamoDB (not by Lambda).
+
 ```python
-import os
 import json
 import boto3
 from datetime import datetime, timezone, timedelta
@@ -211,49 +217,35 @@ def call_aws_mcp(tool_name: str, arguments: dict, account_id: str, region: str =
 
 
 def handler(event, context):
-    """Lambda handler for Gateway invocations.
+    """Lambda handler - simple bridge for AWS MCP queries.
 
     Gateway format:
     - event = tool arguments directly (e.g., {"account_id": "123", "tool_name": "aws___list_regions"})
     - context.client_context.custom contains bedrockAgentCoreToolName
     """
-    accounts = json.loads(os.environ.get('TARGET_ACCOUNTS', '[]'))
-
     # Get tool name from Gateway context
     tool_name = None
     if hasattr(context, 'client_context') and context.client_context:
         custom = getattr(context.client_context, 'custom', None)
         if custom and 'bedrockAgentCoreToolName' in custom:
             full_tool_name = custom['bedrockAgentCoreToolName']
-            # Strip target prefix (e.g., "bridge-lambda___query" -> "query")
             tool_name = full_tool_name.split('___', 1)[1] if '___' in full_tool_name else full_tool_name
 
-    if tool_name == 'list_accounts':
-        return accounts  # Gateway expects direct return, not statusCode wrapper
+    if tool_name == 'query':
+        account_id = event.get('account_id')
+        mcp_tool = event.get('tool_name')
+        if not account_id:
+            return {'error': 'Missing account_id'}
+        if not mcp_tool:
+            return {'error': 'Missing tool_name'}
 
-    elif tool_name == 'query':
         result = call_aws_mcp(
-            tool_name=event.get('tool_name'),
+            tool_name=mcp_tool,
             arguments=event.get('arguments', {}),
-            account_id=event.get('account_id'),
+            account_id=account_id,
             region=event.get('region', 'us-east-1')
         )
         return result
-
-    elif tool_name == 'query_all':
-        results = {}
-        for acc in accounts:
-            try:
-                result = call_aws_mcp(
-                    tool_name=event.get('tool_name'),
-                    arguments=event.get('arguments', {}),
-                    account_id=acc['id'],
-                    region=event.get('region', 'us-east-1')
-                )
-                results[acc['id']] = {'status': 'success', 'data': result}
-            except Exception as e:
-                results[acc['id']] = {'status': 'error', 'error': str(e)}
-        return results
 
     return {'error': f'Unknown tool: {tool_name}'}
 ```
@@ -264,15 +256,21 @@ def handler(event, context):
 
 The infrastructure is implemented in TypeScript CDK. Key stacks:
 
+**`lib/dynamodb-stack.ts`** - Creates DynamoDB table for account mappings:
+- Agent queries this table to get account list and map names to IDs
+- GSI for querying by environment
+- Runtime role has read access
+
 **`lib/lambda-stack.ts`** - Creates the Bridge Lambda with:
 - Cross-account AssumeRole permissions
 - AWS MCP access permissions (`aws-mcp:InvokeMcp`, `aws-mcp:CallReadOnlyTool`)
 - Python 3.12 runtime with 120s timeout
+- No account configuration - Lambda is a simple bridge
 
 **`lib/gateway-stack.ts`** - Creates AgentCore Gateway with:
 - MCP protocol type
 - JWT authorizer (Cognito)
-- Lambda target with tool schemas for `list_accounts`, `query`, `query_all`
+- Lambda target with `query` tool schema
 
 **`lib/cognito-stack.ts`** - Creates Cognito User Pool with:
 - Password auth flow for testing
@@ -295,19 +293,20 @@ npm install
 # Bootstrap CDK (first time only)
 npx cdk bootstrap
 
-# Deploy all 6 stacks
+# Deploy all 7 stacks
 npx cdk deploy --all -c region=us-west-2 -c centralAccountId=YOUR_ACCOUNT_ID
 ```
 
 This deploys:
-1. **CognitoStack** - User Pool and Client for JWT authentication
-2. **LambdaStack** - Bridge Lambda function with cross-account permissions
-3. **RolesStack** - Gateway and Runtime IAM roles
-4. **EcrStack** - ECR repository for agent container
-5. **GatewayStack** - AgentCore Gateway with Lambda target and JWT authorizer
-6. **MemberAccountStack** - Target role for cross-account access
+1. **DynamoDBStack** - Account mappings table (agent queries this)
+2. **CognitoStack** - User Pool and Client for JWT authentication
+3. **LambdaStack** - Bridge Lambda function with cross-account permissions
+4. **RolesStack** - Gateway and Runtime IAM roles
+5. **EcrStack** - ECR repository for agent container
+6. **GatewayStack** - AgentCore Gateway with Lambda target and JWT authorizer
+7. **MemberAccountStack** - Target role for cross-account access
 
-See `agentcore-gateway/README.md` for detailed deployment instructions and testing.
+After deployment, populate the accounts table in DynamoDB - see `agentcore-gateway/README.md` for details.
 
 ---
 
@@ -315,7 +314,7 @@ See `agentcore-gateway/README.md` for detailed deployment instructions and testi
 
 | Aspect | Direct Proxy | **Lambda Bridge (CDK)** |
 |--------|--------------|-------------------------|
-| **Infrastructure** | None (IAM only) | 6 CDK stacks (fully automated) |
+| **Infrastructure** | None (IAM only) | 7 CDK stacks (fully automated) |
 | **Deployment** | Run anywhere | `npx cdk deploy --all` |
 | **OAuth Setup** | None | None (uses Cognito JWT) |
 | **Gateway Auth** | N/A | SigV4 (automatic) |
@@ -333,6 +332,7 @@ See `agentcore-gateway/README.md` for detailed deployment instructions and testi
 - **Gateway Event Format**: When Gateway invokes Lambda, arguments are in `event` directly, tool name is in `context.client_context.custom['bedrockAgentCoreToolName']`
 - **MCP Sessions**: AWS MCP Server requires `initialize` before `tools/call` - Lambda must maintain session IDs
 - **Region**: AWS MCP Server is only available in `us-east-1` - Lambda signs requests to this region regardless of deployment region
+- **Account Management**: Agent should manage account mappings (via DynamoDB), not Lambda - this allows dynamic account registration without Lambda redeployment
 
 ## References
 

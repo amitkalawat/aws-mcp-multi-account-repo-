@@ -103,14 +103,13 @@ agentcore-gateway/
 │   │   └── infrastructure.ts              # CDK app entry point
 │   ├── lib/
 │   │   ├── cognito-stack.ts               # Cognito User Pool
+│   │   ├── dynamodb-stack.ts              # DynamoDB table for account mappings
 │   │   ├── lambda-stack.ts                # Bridge Lambda function
 │   │   ├── roles-stack.ts                 # Gateway and Runtime IAM roles
 │   │   ├── member-account-stack.ts        # Member account target role
 │   │   ├── ecr-stack.ts                   # ECR repository for agent container
 │   │   ├── gateway-stack.ts               # AgentCore Gateway and Lambda target
 │   │   └── runtime-stack.ts               # AgentCore Runtime and endpoint
-│   ├── config/
-│   │   └── accounts.json                  # Account configuration (gitignored)
 │   ├── package.json                       # Node.js dependencies
 │   ├── cdk.json                           # CDK configuration
 │   └── tsconfig.json                      # TypeScript configuration
@@ -124,21 +123,7 @@ agentcore-gateway/
 
 ## Quick Start
 
-### 1. Configure Accounts
-
-Create `infrastructure/config/accounts.json`:
-
-```json
-{
-  "accounts": [
-    {"id": "111111111111", "name": "Central", "role": "central"},
-    {"id": "222222222222", "name": "Production", "role": "member"},
-    {"id": "333333333333", "name": "Staging", "role": "member"}
-  ]
-}
-```
-
-### 2. Deploy Infrastructure
+### 1. Deploy Infrastructure
 
 ```bash
 cd agentcore-gateway/infrastructure
@@ -159,11 +144,39 @@ npx cdk deploy --all \
 ```
 
 The CDK deployment creates:
-1. **Cognito** - User Pool and Client for JWT authentication
-2. **Lambda** - Bridge function for AWS MCP Server access
-3. **Roles** - Gateway and Runtime IAM roles
-4. **ECR** - Repository for agent container
-5. **Gateway** - AgentCore Gateway with Lambda target
+1. **DynamoDB** - Account mappings table (agent queries this for account list)
+2. **Cognito** - User Pool and Client for JWT authentication
+3. **Lambda** - Bridge function for AWS MCP Server access
+4. **Roles** - Gateway and Runtime IAM roles
+5. **ECR** - Repository for agent container
+6. **Gateway** - AgentCore Gateway with Lambda target
+
+### 2. Configure Account Mappings
+
+After deployment, populate the DynamoDB accounts table. The agent queries this table to get the list of accounts and map account names to IDs.
+
+```bash
+# Add accounts to the DynamoDB table
+TABLE_NAME="central-ops-accounts-dev"
+
+# Example: Add production account
+aws dynamodb put-item --table-name $TABLE_NAME --item '{
+  "account_id": {"S": "222222222222"},
+  "name": {"S": "Production"},
+  "environment": {"S": "prod"},
+  "description": {"S": "Production AWS account"},
+  "enabled": {"BOOL": true}
+}'
+
+# Example: Add staging account
+aws dynamodb put-item --table-name $TABLE_NAME --item '{
+  "account_id": {"S": "333333333333"},
+  "name": {"S": "Staging"},
+  "environment": {"S": "staging"},
+  "description": {"S": "Staging AWS account"},
+  "enabled": {"BOOL": true}
+}'
+```
 
 ### 3. Deploy Runtime (Optional)
 
@@ -182,7 +195,7 @@ cd ../infrastructure
 npx cdk deploy CentralOps-Runtime-dev -c region=us-west-2 -c deployRuntime=true
 ```
 
-### 4. Deploy Member Account Roles
+### 5. Deploy Member Account Roles
 
 For each member account, deploy the target role:
 
@@ -229,12 +242,14 @@ gateway:
   gateway_id: ${GATEWAY_ID}
 ```
 
-### Lambda Environment Variables
+### Lambda Configuration
 
-| Variable | Description |
-|----------|-------------|
-| `TARGET_ACCOUNTS` | JSON array of target accounts |
-| `TARGET_ROLE_NAME` | IAM role name in member accounts (default: `CentralOpsTargetRole`) |
+The Lambda Bridge is a simple pass-through function that:
+1. Receives query requests with `account_id`, `tool_name`, and `arguments`
+2. Assumes the target role in the specified account
+3. Calls AWS MCP Server with the assumed credentials
+
+No environment variables are required - account management is handled by the agent via DynamoDB.
 
 ## Testing
 
@@ -285,20 +300,20 @@ TOKEN=$(aws cognito-idp initiate-auth \
   --auth-parameters USERNAME=test@example.com,PASSWORD=TestPass123! \
   --query 'AuthenticationResult.IdToken' --output text)
 
-# Test Gateway - list accounts
-curl -s -X POST "$GATEWAY_URL" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bridge-lambda___list_accounts","arguments":{}}}'
-
 # Test Gateway - query AWS MCP Server
 curl -s -X POST "$GATEWAY_URL" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bridge-lambda___query","arguments":{"account_id":"YOUR_ACCOUNT_ID","tool_name":"aws___list_regions","arguments":{}}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bridge-lambda___query","arguments":{"account_id":"YOUR_ACCOUNT_ID","tool_name":"aws___list_regions","arguments":{}}}}'
 ```
 
 ## CDK Stacks
+
+### DynamoDBStack
+- Account mappings table (`central-ops-accounts-{env}`)
+- Agent queries this table to get account list and map names to IDs
+- GSI for querying accounts by environment
+- Point-in-time recovery enabled
 
 ### CognitoStack
 - Cognito User Pool for client authentication
@@ -331,7 +346,8 @@ curl -s -X POST "$GATEWAY_URL" \
 ### RuntimeStack (conditional)
 - AgentCore Runtime with containerized agent
 - Runtime endpoint for invocations
-- Environment variables for Gateway URL and model configuration
+- Environment variables: `GATEWAY_URL`, `MODEL_ID`, `ACCOUNTS_TABLE_NAME`
+- Runtime role has DynamoDB read access for account lookups
 - Deployed when `-c deployRuntime=true` is passed
 
 ## Architecture Decision: Why Lambda Bridge?
