@@ -5,6 +5,9 @@ import { CognitoStack } from '../lib/cognito-stack';
 import { LambdaStack } from '../lib/lambda-stack';
 import { RolesStack } from '../lib/roles-stack';
 import { MemberAccountStack } from '../lib/member-account-stack';
+import { EcrStack } from '../lib/ecr-stack';
+import { RuntimeStack } from '../lib/runtime-stack';
+import { GatewayStack } from '../lib/gateway-stack';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -52,3 +55,41 @@ const memberStack = new MemberAccountStack(app, `CentralOps-MemberRole-${environ
   env,
 });
 memberStack.addDependency(lambdaStack);
+
+// ECR Stack for Agent container
+const ecrStack = new EcrStack(app, `CentralOps-ECR-${environment}`, {
+  environment,
+  env,
+});
+
+// Gateway Stack
+const gatewayStack = new GatewayStack(app, `CentralOps-Gateway-${environment}`, {
+  environment,
+  gatewayRole: rolesStack.gatewayRole,
+  bridgeLambda: lambdaStack.bridgeLambda,
+  cognitoDiscoveryUrl: cognitoStack.discoveryUrl,
+  cognitoClientId: cognitoStack.userPoolClient.userPoolClientId,
+  env,
+});
+gatewayStack.addDependency(rolesStack);
+gatewayStack.addDependency(lambdaStack);
+gatewayStack.addDependency(cognitoStack);
+
+// Runtime Stack for AgentCore Runtime
+// Set deployRuntime context to 'true' to deploy (requires container image in ECR)
+const deployRuntime = app.node.tryGetContext('deployRuntime') === 'true';
+if (deployRuntime) {
+  const runtimeStack = new RuntimeStack(app, `CentralOps-Runtime-${environment}`, {
+    environment,
+    runtimeRole: rolesStack.runtimeRole,
+    repository: ecrStack.repository,
+    gatewayUrl: gatewayStack.gatewayUrl,
+    cognitoDiscoveryUrl: cognitoStack.discoveryUrl,
+    cognitoClientId: cognitoStack.userPoolClient.userPoolClientId,
+    env,
+  });
+  runtimeStack.addDependency(rolesStack);
+  runtimeStack.addDependency(ecrStack);
+  runtimeStack.addDependency(cognitoStack);
+  runtimeStack.addDependency(gatewayStack);
+}

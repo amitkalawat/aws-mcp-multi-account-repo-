@@ -60,6 +60,16 @@ export class RolesStack extends cdk.Stack {
       resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`],
     }));
 
+    // ECR access for pulling container images
+    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['ecr:GetAuthorizationToken'],
+      resources: ['*'],
+    }));
+    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchCheckLayerAvailability'],
+      resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/central-ops-agent-*`],
+    }));
+
     // Outputs
     new cdk.CfnOutput(this, 'GatewayRoleArn', { value: this.gatewayRole.roleArn });
     new cdk.CfnOutput(this, 'RuntimeRoleArn', { value: this.runtimeRole.roleArn });

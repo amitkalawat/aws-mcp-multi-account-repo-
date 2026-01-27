@@ -148,14 +148,80 @@ def call_aws_mcp(
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Lambda handler for Gateway invocations."""
+    """Lambda handler for Gateway and direct invocations.
+
+    Gateway format (from AgentCore Gateway):
+    - event = tool arguments directly (e.g., {"account_id": "123", "tool_name": "aws___list_regions"})
+    - context.client_context.custom contains:
+      - bedrockAgentCoreToolName: "bridge-lambda___query"
+      - bedrockAgentCoreGatewayId, bedrockAgentCoreTargetId, etc.
+
+    Direct invocation format:
+    - event = {"body": "{\"action\": \"list_accounts\"}"}
+    """
+    accounts = json.loads(os.environ.get('TARGET_ACCOUNTS', '[]'))
+
+    # Check if this is from AgentCore Gateway (has client_context with tool info)
+    tool_name = None
+    if hasattr(context, 'client_context') and context.client_context:
+        custom = getattr(context.client_context, 'custom', None)
+        if custom and 'bedrockAgentCoreToolName' in custom:
+            full_tool_name = custom['bedrockAgentCoreToolName']
+            # Strip target prefix (e.g., "bridge-lambda___query" -> "query")
+            if '___' in full_tool_name:
+                tool_name = full_tool_name.split('___', 1)[1]
+            else:
+                tool_name = full_tool_name
+
+    # Gateway invocation: event is the arguments, tool_name from context
+    if tool_name:
+        try:
+            if tool_name == 'list_accounts':
+                return accounts
+
+            elif tool_name == 'query':
+                account_id = event.get('account_id')
+                mcp_tool = event.get('tool_name')
+                tool_args = event.get('arguments', {})
+                region = event.get('region', 'us-east-1')
+
+                if not mcp_tool or not account_id:
+                    return {'error': 'Missing tool_name or account_id'}
+
+                result = call_aws_mcp(mcp_tool, tool_args, account_id, region)
+                return result
+
+            elif tool_name == 'query_all':
+                mcp_tool = event.get('tool_name')
+                tool_args = event.get('arguments', {})
+                region = event.get('region', 'us-east-1')
+
+                if not mcp_tool:
+                    return {'error': 'Missing tool_name'}
+
+                results = {}
+                for acc in accounts:
+                    try:
+                        result = call_aws_mcp(mcp_tool, tool_args, acc['id'], region)
+                        results[acc['id']] = {'status': 'success', 'data': result}
+                    except Exception as e:
+                        results[acc['id']] = {'status': 'error', 'error': str(e)}
+
+                return results
+
+            else:
+                return {'error': f'Unknown tool: {tool_name}'}
+
+        except Exception as e:
+            return {'error': str(e)}
+
+    # Direct invocation format: event has 'body' field
     try:
         body = json.loads(event.get('body', '{}'))
     except json.JSONDecodeError:
         return {'statusCode': 400, 'body': json.dumps({'error': 'Invalid JSON body'})}
 
     action = body.get('action')
-    accounts = json.loads(os.environ.get('TARGET_ACCOUNTS', '[]'))
 
     if action == 'list_accounts':
         return {'statusCode': 200, 'body': json.dumps(accounts)}
