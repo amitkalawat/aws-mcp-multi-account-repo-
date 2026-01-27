@@ -2,9 +2,16 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build a React frontend for the AgentCore Gateway agent, hosted on S3/CloudFront with Cognito OAuth authentication.
+**Goal:** Build a React chat frontend for the AgentCore agent, hosted on S3/CloudFront with Cognito OAuth authentication.
 
-**Architecture:** React SPA that authenticates users via Cognito Hosted UI (OAuth 2.0 PKCE flow), then calls the AgentCore Gateway directly with JWT tokens. The frontend is hosted on S3 as a static website, distributed via CloudFront for HTTPS and caching.
+**Architecture:** React SPA that authenticates users via Cognito Hosted UI (OAuth 2.0 PKCE flow), then sends natural language prompts to the AgentCore Runtime. The agent (running in Runtime) uses Bedrock Claude to understand queries and calls Gateway tools internally.
+
+```
+Frontend → AgentCore Runtime → AgentCore Gateway → Lambda → AWS MCP → Target Accounts
+         (JWT auth)         (Workload Identity)   (SigV4)
+```
+
+The frontend is a **chat interface** - users ask questions in natural language (e.g., "List all S3 buckets in the production account") and the agent figures out which accounts and tools to use.
 
 **Tech Stack:** React 18, TypeScript, Vite, AWS Amplify Auth, TailwindCSS, AWS CDK (TypeScript)
 
@@ -13,8 +20,12 @@
 ## Prerequisites
 
 - Existing AgentCore Gateway deployed (7 stacks already running)
+- Docker installed (for building agent container)
 - Node.js 18+ installed
 - AWS CDK bootstrapped in target region
+- ECR repository created (via EcrStack)
+
+**Note:** This plan will deploy the AgentCore Runtime with the agent container. The Runtime is required because the frontend calls the Runtime (not the Gateway directly).
 
 ---
 
@@ -113,7 +124,7 @@ import * as path from 'path';
 
 export interface FrontendStackProps extends cdk.StackProps {
   environment: string;
-  gatewayUrl: string;
+  runtimeInvocationUrl: string;
   cognitoUserPoolId: string;
   cognitoClientId: string;
   cognitoDomain: string;
@@ -199,7 +210,7 @@ export class FrontendStack extends cdk.Stack {
         VITE_COGNITO_USER_POOL_ID: props.cognitoUserPoolId,
         VITE_COGNITO_CLIENT_ID: props.cognitoClientId,
         VITE_COGNITO_DOMAIN: props.cognitoDomain,
-        VITE_GATEWAY_URL: props.gatewayUrl,
+        VITE_RUNTIME_URL: props.runtimeInvocationUrl,
         VITE_AWS_REGION: this.region,
       }),
       description: 'Frontend environment configuration (copy to .env)',
@@ -215,23 +226,25 @@ Add to `agentcore-gateway/infrastructure/bin/infrastructure.ts`:
 ```typescript
 import { FrontendStack } from '../lib/frontend-stack';
 
-// After GatewayStack creation, add:
+// After RuntimeStack creation, add:
 
-// Frontend Stack
+// Frontend Stack (requires Runtime to be deployed)
 const deployFrontend = app.node.tryGetContext('deployFrontend') === 'true';
-if (deployFrontend) {
+if (deployFrontend && deployRuntime) {
   const frontendStack = new FrontendStack(app, `CentralOps-Frontend-${environment}`, {
     environment,
-    gatewayUrl: gatewayStack.gatewayUrl,
+    runtimeInvocationUrl: `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodeURIComponent(runtimeStack.runtime.attrAgentRuntimeArn)}/invocations`,
     cognitoUserPoolId: cognitoStack.userPool.userPoolId,
     cognitoClientId: cognitoStack.userPoolClient.userPoolClientId,
     cognitoDomain: `central-ops-${environment}.auth.${region}.amazoncognito.com`,
     env,
   });
-  frontendStack.addDependency(gatewayStack);
+  frontendStack.addDependency(runtimeStack);
   frontendStack.addDependency(cognitoStack);
 }
 ```
+
+> **Note:** The Frontend stack requires the Runtime stack to be deployed (`-c deployRuntime=true`) because the frontend calls the Runtime, not the Gateway directly.
 
 **Step 3: Verify CDK compiles**
 
@@ -346,7 +359,7 @@ export function configureAmplify() {
   Amplify.configure(config);
 }
 
-export const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL;
+export const RUNTIME_URL = import.meta.env.VITE_RUNTIME_URL;
 export const AWS_REGION = import.meta.env.VITE_AWS_REGION;
 ```
 
@@ -359,7 +372,7 @@ Create `agentcore-gateway/frontend/.env.example`:
 VITE_COGNITO_USER_POOL_ID=us-east-1_XXXXXXXXX
 VITE_COGNITO_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
 VITE_COGNITO_DOMAIN=central-ops-dev.auth.us-east-1.amazoncognito.com
-VITE_GATEWAY_URL=https://xxxxxxxx.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp
+VITE_RUNTIME_URL=https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3A.../invocations
 VITE_AWS_REGION=us-east-1
 ```
 
@@ -505,89 +518,48 @@ git commit -m "feat(frontend): add auth context and hook"
 
 ---
 
-## Task 6: Create Gateway API Client
+## Task 6: Create Runtime API Client
 
 **Files:**
-- Create: `agentcore-gateway/frontend/src/api/gateway.ts`
-- Create: `agentcore-gateway/frontend/src/types/gateway.ts`
+- Create: `agentcore-gateway/frontend/src/api/runtime.ts`
+- Create: `agentcore-gateway/frontend/src/types/runtime.ts`
 
-**Step 1: Create Gateway types**
+**Step 1: Create Runtime types**
 
-Create `agentcore-gateway/frontend/src/types/gateway.ts`:
+Create `agentcore-gateway/frontend/src/types/runtime.ts`:
 
 ```typescript
-export interface MCPRequest {
-  jsonrpc: '2.0';
-  id: number;
-  method: 'tools/call';
-  params: {
-    name: string;
-    arguments: Record<string, unknown>;
-  };
+export interface RuntimeRequest {
+  prompt: string;
 }
 
-export interface MCPResponse {
-  jsonrpc: '2.0';
-  id: number;
-  result?: {
-    isError: boolean;
-    content: Array<{
-      type: string;
-      text: string;
-    }>;
-  };
-  error?: {
-    code: number;
-    message: string;
-  };
+export interface RuntimeResponse {
+  response: string;
 }
 
-export interface QueryParams {
-  accountId: string;
-  toolName: string;
-  arguments?: Record<string, unknown>;
-  region?: string;
-}
-
-export interface Account {
-  account_id: string;
-  name: string;
-  environment: string;
-  description?: string;
-  enabled: boolean;
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
 }
 ```
 
-**Step 2: Create Gateway API client**
+**Step 2: Create Runtime API client**
 
-Create `agentcore-gateway/frontend/src/api/gateway.ts`:
+Create `agentcore-gateway/frontend/src/api/runtime.ts`:
 
 ```typescript
-import { GATEWAY_URL } from '../config/amplify';
-import type { MCPRequest, MCPResponse, QueryParams } from '../types/gateway';
+import { RUNTIME_URL } from '../config/amplify';
+import type { RuntimeRequest, RuntimeResponse } from '../types/runtime';
 
-let requestId = 0;
-
-export async function queryGateway(
-  params: QueryParams,
+export async function sendPrompt(
+  prompt: string,
   idToken: string
-): Promise<MCPResponse> {
-  const request: MCPRequest = {
-    jsonrpc: '2.0',
-    id: ++requestId,
-    method: 'tools/call',
-    params: {
-      name: 'bridge-lambda___query',
-      arguments: {
-        account_id: params.accountId,
-        tool_name: params.toolName,
-        arguments: params.arguments || {},
-        region: params.region || 'us-east-1',
-      },
-    },
-  };
+): Promise<string> {
+  const request: RuntimeRequest = { prompt };
 
-  const response = await fetch(GATEWAY_URL, {
+  const response = await fetch(RUNTIME_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -597,44 +569,12 @@ export async function queryGateway(
   });
 
   if (!response.ok) {
-    throw new Error(`Gateway request failed: ${response.status} ${response.statusText}`);
+    const errorText = await response.text();
+    throw new Error(`Runtime request failed: ${response.status} - ${errorText}`);
   }
 
-  return response.json();
-}
-
-export function parseGatewayResponse(response: MCPResponse): string {
-  if (response.error) {
-    throw new Error(response.error.message);
-  }
-
-  if (!response.result?.content?.[0]?.text) {
-    return 'No response content';
-  }
-
-  try {
-    // The response is nested JSON - parse it
-    const outerText = response.result.content[0].text;
-    const outerJson = JSON.parse(outerText);
-
-    if (outerJson.result?.content?.[0]?.text) {
-      const innerText = outerJson.result.content[0].text;
-      const innerJson = JSON.parse(innerText);
-
-      // Return formatted response or raw content
-      if (innerJson.content?.result) {
-        return JSON.stringify(innerJson.content.result, null, 2);
-      }
-      if (innerJson.response) {
-        return innerJson.response;
-      }
-      return JSON.stringify(innerJson, null, 2);
-    }
-
-    return JSON.stringify(outerJson, null, 2);
-  } catch {
-    return response.result.content[0].text;
-  }
+  const data: RuntimeResponse = await response.json();
+  return data.response;
 }
 ```
 
@@ -643,9 +583,9 @@ export function parseGatewayResponse(response: MCPResponse): string {
 ```bash
 mkdir -p agentcore-gateway/frontend/src/api
 mkdir -p agentcore-gateway/frontend/src/types
-git add agentcore-gateway/frontend/src/api/gateway.ts
-git add agentcore-gateway/frontend/src/types/gateway.ts
-git commit -m "feat(frontend): add Gateway API client"
+git add agentcore-gateway/frontend/src/api/runtime.ts
+git add agentcore-gateway/frontend/src/types/runtime.ts
+git commit -m "feat(frontend): add Runtime API client"
 ```
 
 ---
@@ -654,9 +594,10 @@ git commit -m "feat(frontend): add Gateway API client"
 
 **Files:**
 - Create: `agentcore-gateway/frontend/src/components/LoginButton.tsx`
-- Create: `agentcore-gateway/frontend/src/components/QueryForm.tsx`
-- Create: `agentcore-gateway/frontend/src/components/ResponseDisplay.tsx`
 - Create: `agentcore-gateway/frontend/src/components/Header.tsx`
+- Create: `agentcore-gateway/frontend/src/components/ChatMessage.tsx`
+- Create: `agentcore-gateway/frontend/src/components/ChatInput.tsx`
+- Create: `agentcore-gateway/frontend/src/components/ChatContainer.tsx`
 
 **Step 1: Create LoginButton component**
 
@@ -723,133 +664,175 @@ export function Header() {
 }
 ```
 
-**Step 3: Create QueryForm component**
+**Step 3: Create ChatMessage component**
 
-Create `agentcore-gateway/frontend/src/components/QueryForm.tsx`:
+Create `agentcore-gateway/frontend/src/components/ChatMessage.tsx`:
 
 ```typescript
-import { useState } from 'react';
+import type { ChatMessage as ChatMessageType } from '../types/runtime';
 
-interface QueryFormProps {
-  onSubmit: (accountId: string, toolName: string, cliCommand?: string) => void;
-  isLoading: boolean;
+interface ChatMessageProps {
+  message: ChatMessageType;
 }
 
-export function QueryForm({ onSubmit, isLoading }: QueryFormProps) {
-  const [accountId, setAccountId] = useState('');
-  const [toolName, setToolName] = useState('aws___list_regions');
-  const [cliCommand, setCliCommand] = useState('aws s3 ls');
+export function ChatMessage({ message }: ChatMessageProps) {
+  const isUser = message.role === 'user';
+
+  return (
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
+      <div
+        className={`max-w-3xl px-4 py-3 rounded-lg ${
+          isUser
+            ? 'bg-blue-600 text-white'
+            : 'bg-gray-100 text-gray-900'
+        }`}
+      >
+        <div className="text-xs opacity-70 mb-1">
+          {isUser ? 'You' : 'Agent'}
+        </div>
+        <div className="whitespace-pre-wrap break-words">
+          {message.content}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+**Step 4: Create ChatInput component**
+
+Create `agentcore-gateway/frontend/src/components/ChatInput.tsx`:
+
+```typescript
+import { useState, useRef, useEffect } from 'react';
+
+interface ChatInputProps {
+  onSend: (message: string) => void;
+  isLoading: boolean;
+  placeholder?: string;
+}
+
+export function ChatInput({ onSend, isLoading, placeholder }: ChatInputProps) {
+  const [input, setInput] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [input]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit(accountId, toolName, toolName === 'aws___call_aws' ? cliCommand : undefined);
+    if (input.trim() && !isLoading) {
+      onSend(input.trim());
+      setInput('');
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      <div>
-        <label htmlFor="accountId" className="block text-sm font-medium text-gray-700">
-          Account ID
-        </label>
-        <input
-          type="text"
-          id="accountId"
-          value={accountId}
-          onChange={(e) => setAccountId(e.target.value)}
-          placeholder="123456789012"
-          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm border p-2"
-          required
-        />
-      </div>
-
-      <div>
-        <label htmlFor="toolName" className="block text-sm font-medium text-gray-700">
-          Tool
-        </label>
-        <select
-          id="toolName"
-          value={toolName}
-          onChange={(e) => setToolName(e.target.value)}
-          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm border p-2"
-        >
-          <option value="aws___list_regions">List Regions</option>
-          <option value="aws___call_aws">AWS CLI Command</option>
-        </select>
-      </div>
-
-      {toolName === 'aws___call_aws' && (
-        <div>
-          <label htmlFor="cliCommand" className="block text-sm font-medium text-gray-700">
-            AWS CLI Command
-          </label>
-          <input
-            type="text"
-            id="cliCommand"
-            value={cliCommand}
-            onChange={(e) => setCliCommand(e.target.value)}
-            placeholder="aws s3 ls"
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm border p-2 font-mono"
-            required
-          />
-          <p className="mt-1 text-xs text-gray-500">
-            Must start with "aws" (e.g., "aws s3 ls", "aws ec2 describe-instances")
-          </p>
-        </div>
-      )}
-
+    <form onSubmit={handleSubmit} className="flex gap-2">
+      <textarea
+        ref={textareaRef}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder || "Ask about your AWS resources..."}
+        className="flex-1 resize-none rounded-lg border border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[48px] max-h-[200px]"
+        rows={1}
+        disabled={isLoading}
+      />
       <button
         type="submit"
-        disabled={isLoading}
-        className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+        disabled={isLoading || !input.trim()}
+        className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        {isLoading ? 'Querying...' : 'Query'}
+        {isLoading ? (
+          <span className="flex items-center gap-2">
+            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            Thinking...
+          </span>
+        ) : (
+          'Send'
+        )}
       </button>
     </form>
   );
 }
 ```
 
-**Step 4: Create ResponseDisplay component**
+**Step 5: Create ChatContainer component**
 
-Create `agentcore-gateway/frontend/src/components/ResponseDisplay.tsx`:
+Create `agentcore-gateway/frontend/src/components/ChatContainer.tsx`:
 
 ```typescript
-interface ResponseDisplayProps {
-  response: string | null;
-  error: string | null;
+import { useRef, useEffect } from 'react';
+import { ChatMessage } from './ChatMessage';
+import { ChatInput } from './ChatInput';
+import type { ChatMessage as ChatMessageType } from '../types/runtime';
+
+interface ChatContainerProps {
+  messages: ChatMessageType[];
+  onSendMessage: (message: string) => void;
+  isLoading: boolean;
 }
 
-export function ResponseDisplay({ response, error }: ResponseDisplayProps) {
-  if (error) {
-    return (
-      <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-md">
-        <h3 className="text-sm font-medium text-red-800">Error</h3>
-        <pre className="mt-2 text-sm text-red-700 whitespace-pre-wrap">{error}</pre>
-      </div>
-    );
-  }
+export function ChatContainer({ messages, onSendMessage, isLoading }: ChatContainerProps) {
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  if (!response) {
-    return null;
-  }
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   return (
-    <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-md">
-      <h3 className="text-sm font-medium text-gray-800">Response</h3>
-      <pre className="mt-2 text-sm text-gray-700 whitespace-pre-wrap overflow-x-auto max-h-96 overflow-y-auto">
-        {response}
-      </pre>
+    <div className="flex flex-col h-[calc(100vh-180px)]">
+      <div className="flex-1 overflow-y-auto p-4">
+        {messages.length === 0 ? (
+          <div className="text-center text-gray-500 mt-8">
+            <p className="text-lg mb-4">Welcome to Central Ops Agent</p>
+            <p className="text-sm">Ask questions about your AWS resources across accounts.</p>
+            <div className="mt-6 text-left max-w-md mx-auto bg-gray-50 rounded-lg p-4">
+              <p className="text-xs font-medium text-gray-700 mb-2">Example queries:</p>
+              <ul className="text-xs text-gray-600 space-y-1">
+                <li>"List all S3 buckets in the production account"</li>
+                <li>"How many EC2 instances are running in staging?"</li>
+                <li>"Show me Lambda functions in account 123456789012"</li>
+                <li>"What RDS databases exist across all accounts?"</li>
+              </ul>
+            </div>
+          </div>
+        ) : (
+          messages.map((message) => (
+            <ChatMessage key={message.id} message={message} />
+          ))
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+      <div className="border-t bg-white p-4">
+        <ChatInput onSend={onSendMessage} isLoading={isLoading} />
+      </div>
     </div>
   );
 }
 ```
 
-**Step 5: Commit UI components**
+**Step 6: Commit UI components**
 
 ```bash
 mkdir -p agentcore-gateway/frontend/src/components
 git add agentcore-gateway/frontend/src/components/
-git commit -m "feat(frontend): add UI components"
+git commit -m "feat(frontend): add chat UI components"
 ```
 
 ---
@@ -884,28 +867,33 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 );
 ```
 
-**Step 2: Update App.tsx**
+**Step 2: Update App.tsx with chat interface**
 
 Replace `agentcore-gateway/frontend/src/App.tsx`:
 
 ```typescript
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Header } from './components/Header';
-import { QueryForm } from './components/QueryForm';
-import { ResponseDisplay } from './components/ResponseDisplay';
+import { ChatContainer } from './components/ChatContainer';
 import { useAuth } from './hooks/useAuth';
-import { queryGateway, parseGatewayResponse } from './api/gateway';
+import { sendPrompt } from './api/runtime';
+import type { ChatMessage } from './types/runtime';
 
 function App() {
   const { isAuthenticated, isLoading: authLoading, getIdToken } = useAuth();
-  const [response, setResponse] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [isQuerying, setIsQuerying] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleQuery = async (accountId: string, toolName: string, cliCommand?: string) => {
-    setIsQuerying(true);
-    setError(null);
-    setResponse(null);
+  const handleSendMessage = useCallback(async (content: string) => {
+    // Add user message
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setIsLoading(true);
 
     try {
       const token = await getIdToken();
@@ -913,24 +901,29 @@ function App() {
         throw new Error('Not authenticated');
       }
 
-      const args: Record<string, unknown> = {};
-      if (toolName === 'aws___call_aws' && cliCommand) {
-        args.cli_command = cliCommand;
-      }
+      const response = await sendPrompt(content, token);
 
-      const result = await queryGateway(
-        { accountId, toolName, arguments: args },
-        token
-      );
-
-      const parsed = parseGatewayResponse(result);
-      setResponse(parsed);
+      // Add assistant message
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: response,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      // Add error as assistant message
+      const errorMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
     } finally {
-      setIsQuerying(false);
+      setIsLoading(false);
     }
-  };
+  }, [getIdToken]);
 
   if (authLoading) {
     return (
@@ -943,23 +936,23 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
-      <main className="max-w-3xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+      <main className="max-w-4xl mx-auto">
         {isAuthenticated ? (
-          <div className="bg-white shadow rounded-lg p-6">
-            <h2 className="text-lg font-medium text-gray-900 mb-4">
-              Query AWS Accounts
-            </h2>
-            <QueryForm onSubmit={handleQuery} isLoading={isQuerying} />
-            <ResponseDisplay response={response} error={error} />
-          </div>
+          <ChatContainer
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            isLoading={isLoading}
+          />
         ) : (
-          <div className="bg-white shadow rounded-lg p-6 text-center">
-            <h2 className="text-lg font-medium text-gray-900 mb-4">
-              Welcome to Central Ops Agent
-            </h2>
-            <p className="text-gray-600 mb-4">
-              Sign in to query AWS resources across your accounts.
-            </p>
+          <div className="px-4 py-8">
+            <div className="bg-white shadow rounded-lg p-6 text-center">
+              <h2 className="text-lg font-medium text-gray-900 mb-4">
+                Welcome to Central Ops Agent
+              </h2>
+              <p className="text-gray-600 mb-4">
+                Sign in to chat with the agent and query AWS resources across your accounts.
+              </p>
+            </div>
           </div>
         )}
       </main>
@@ -975,7 +968,7 @@ export default App;
 ```bash
 git add agentcore-gateway/frontend/src/App.tsx
 git add agentcore-gateway/frontend/src/main.tsx
-git commit -m "feat(frontend): implement main App with query functionality"
+git commit -m "feat(frontend): implement chat-based App for Runtime interaction"
 ```
 
 ---
@@ -1070,20 +1063,46 @@ git commit -m "feat(frontend): add build and deploy scripts"
 
 ## Task 10: Deploy and Test
 
-**Step 1: Deploy Cognito changes**
+**Step 1: Deploy Cognito changes (OAuth configuration)**
 
 ```bash
 cd agentcore-gateway/infrastructure
 npx cdk deploy CentralOps-Cognito-dev --region us-east-1
 ```
 
-**Step 2: Deploy Frontend stack**
+**Step 2: Build and push agent container**
+
+The Runtime needs the agent container in ECR:
 
 ```bash
-npx cdk deploy CentralOps-Frontend-dev -c deployFrontend=true --region us-east-1
+cd agentcore-gateway/agent
+
+# Get ECR login and account ID
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION="us-east-1"
+
+aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+
+# Build and push
+docker build -t central-ops-agent .
+docker tag central-ops-agent:latest $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/central-ops-agent-dev:latest
+docker push $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/central-ops-agent-dev:latest
 ```
 
-**Step 3: Get configuration and create .env**
+**Step 3: Deploy Runtime stack**
+
+```bash
+cd agentcore-gateway/infrastructure
+npx cdk deploy CentralOps-Runtime-dev -c deployRuntime=true --region us-east-1
+```
+
+**Step 4: Deploy Frontend stack**
+
+```bash
+npx cdk deploy CentralOps-Frontend-dev -c deployRuntime=true -c deployFrontend=true --region us-east-1
+```
+
+**Step 5: Get configuration and create .env**
 
 ```bash
 # Get frontend config from stack output
@@ -1094,7 +1113,7 @@ aws cloudformation describe-stacks \
   --output text | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > agentcore-gateway/frontend/.env
 ```
 
-**Step 4: Update Cognito callback URLs**
+**Step 6: Update Cognito callback URLs with CloudFront URL**
 
 Get the CloudFront URL and update Cognito:
 
@@ -1105,11 +1124,12 @@ FRONTEND_URL=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' \
   --output text)
 
-echo "Update Cognito callback URLs to include: $FRONTEND_URL"
-# Manual step: Update CognitoStack callbackUrls and logoutUrls, then redeploy
+echo "CloudFront URL: $FRONTEND_URL"
+# Update cognito-stack.ts callbackUrls and logoutUrls to include this URL, then redeploy:
+# npx cdk deploy CentralOps-Cognito-dev --region us-east-1
 ```
 
-**Step 5: Build and deploy frontend**
+**Step 7: Build and deploy frontend**
 
 ```bash
 cd agentcore-gateway/frontend
@@ -1118,19 +1138,24 @@ npm run build
 npm run deploy
 ```
 
-**Step 6: Test the application**
+**Step 8: Test the application**
 
 1. Open the CloudFront URL in browser
 2. Click "Sign In" - redirects to Cognito Hosted UI
 3. Log in with test user credentials
-4. Enter an account ID and run a query
-5. Verify response displays correctly
+4. Type a natural language query like: "List all S3 buckets in account 878687028155"
+5. Verify the agent responds with the results
 
-**Step 7: Final commit**
+**Example queries to test:**
+- "List all S3 buckets in the production account"
+- "How many EC2 instances are running in account 959887439517?"
+- "What Lambda functions exist in the datalake account?"
+
+**Step 9: Final commit**
 
 ```bash
 git add -A
-git commit -m "feat(frontend): complete frontend implementation"
+git commit -m "feat(frontend): complete chat frontend for AgentCore Runtime"
 ```
 
 ---
@@ -1144,10 +1169,51 @@ git commit -m "feat(frontend): complete frontend implementation"
 | 3 | Initialize React App | `frontend/` directory |
 | 4 | Create Amplify Config | `amplify.ts`, `.env.example` |
 | 5 | Create Auth Context | `AuthContext.tsx`, `useAuth.ts` |
-| 6 | Create Gateway API Client | `gateway.ts`, `types/gateway.ts` |
-| 7 | Create UI Components | `LoginButton.tsx`, `QueryForm.tsx`, etc. |
+| 6 | Create Runtime API Client | `runtime.ts`, `types/runtime.ts` |
+| 7 | Create Chat UI Components | `ChatMessage.tsx`, `ChatInput.tsx`, `ChatContainer.tsx` |
 | 8 | Create Main App | `App.tsx`, `main.tsx` |
 | 9 | Add Deploy Scripts | `deploy.sh`, `package.json` |
-| 10 | Deploy and Test | CDK deploy + frontend deploy |
+| 10 | Deploy and Test | Build agent container, CDK deploy Runtime + Frontend |
 
-**Total estimated tasks:** 10 major tasks with ~50 individual steps
+**Total estimated tasks:** 10 major tasks with ~55 individual steps
+
+## Architecture Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              FRONTEND (React)                               │
+│  - Chat interface for natural language queries                              │
+│  - Authenticates via Cognito OAuth (PKCE)                                   │
+│  - Sends prompts to Runtime                                                 │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │ POST { "prompt": "..." }
+                                    │ Authorization: Bearer <JWT>
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        AGENTCORE RUNTIME (Container)                        │
+│  - Runs central_ops_agent.py                                                │
+│  - Uses Bedrock Claude to understand queries                                │
+│  - Calls Gateway tools to query AWS resources                               │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │ Workload Identity Token
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           AGENTCORE GATEWAY                                 │
+│  - Routes tool calls to Lambda target                                       │
+│  - Automatic SigV4 signing                                                  │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │ SigV4
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            LAMBDA BRIDGE                                    │
+│  - Assumes role in target account                                           │
+│  - Calls AWS MCP Server                                                     │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │ SigV4 (assumed credentials)
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           AWS MCP SERVER                                    │
+│  - Executes AWS CLI commands                                                │
+│  - Returns results                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
