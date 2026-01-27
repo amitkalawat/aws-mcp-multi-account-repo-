@@ -408,7 +408,7 @@ aws cloudformation create-stack-set \
 
 **Option B: Create role manually via CLI** (run these commands in the MEMBER account)
 
-> **Note:** Replace `CENTRAL_ACCOUNT_ID` with your central account ID (the account where Lambda is deployed, e.g., `878687028155`)
+> **Note:** Replace `CENTRAL_ACCOUNT_ID` with your central account ID (the account where Lambda is deployed)
 
 ```bash
 # ============================================
@@ -416,7 +416,7 @@ aws cloudformation create-stack-set \
 # ============================================
 
 # Set your central account ID (where Lambda is deployed)
-CENTRAL_ACCOUNT_ID="878687028155"  # <-- CHANGE THIS to your central account ID
+CENTRAL_ACCOUNT_ID="111111111111"  # <-- CHANGE THIS to your central account ID
 
 # Step 1: Create the trust policy file
 cat > /tmp/trust-policy.json << EOF
