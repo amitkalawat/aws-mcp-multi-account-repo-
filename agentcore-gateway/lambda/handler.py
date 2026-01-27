@@ -2,10 +2,11 @@
 Lambda Bridge for AWS MCP Server access.
 
 This Lambda is a simple bridge that:
-1. Receives account_id and tool request from agent (via Gateway)
-2. Assumes IAM role in target account
-3. Calls AWS MCP Server with SigV4 signing
-4. Returns result
+1. Receives tool request from agent (via Gateway)
+2. For account-specific tools: Assumes IAM role in target account
+3. For global tools (docs, SOPs): Uses Lambda's own credentials
+4. Calls AWS MCP Server with SigV4 signing
+5. Returns result
 
 Account management is handled by the agent (via DynamoDB), not this Lambda.
 """
@@ -15,18 +16,31 @@ from datetime import datetime, timezone, timedelta
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 import urllib.request
-from typing import Dict, Any
+from typing import Dict, Any, Set
 
 # AWS MCP Server is only available in us-east-1
 AWS_MCP_ENDPOINT = 'https://aws-mcp.us-east-1.api.aws/mcp'
 AWS_MCP_REGION = 'us-east-1'
 TARGET_ROLE_NAME = 'CentralOpsTargetRole'
 
+# Global tools don't need account-specific credentials
+# These use Lambda's own credentials to access AWS MCP Server
+GLOBAL_TOOLS: Set[str] = {
+    'aws___search_documentation',
+    'aws___read_documentation',
+    'aws___retrieve_agent_sop',
+    'aws___recommend',
+    'aws___suggest_aws_commands',
+}
+
 # In-memory credential cache (persists across warm invocations)
 credential_cache: Dict[str, Dict] = {}
 
 # Session cache per account (for MCP session persistence)
 session_cache: Dict[str, str] = {}
+
+# Session cache for global tools (no account context)
+global_session_id: str = None
 
 
 def get_credentials(account_id: str) -> Dict[str, Any]:
@@ -94,7 +108,7 @@ def make_mcp_request(
 
 
 def get_or_create_mcp_session(account_id: str, boto_session: 'boto3.Session') -> str:
-    """Get existing MCP session or create new one."""
+    """Get existing MCP session or create new one for account-specific tools."""
     if account_id in session_cache:
         return session_cache[account_id]
 
@@ -119,13 +133,44 @@ def get_or_create_mcp_session(account_id: str, boto_session: 'boto3.Session') ->
     raise Exception(f"Failed to initialize MCP session: {result}")
 
 
+def get_or_create_global_mcp_session() -> tuple:
+    """Get existing MCP session or create new one for global tools (using Lambda's credentials)."""
+    global global_session_id
+
+    # Create boto session with Lambda's own credentials
+    boto_session = boto3.Session(region_name=AWS_MCP_REGION)
+
+    if global_session_id:
+        return global_session_id, boto_session
+
+    # Initialize new MCP session
+    result, headers = make_mcp_request(
+        method="initialize",
+        params={
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "aws-mcp-bridge-global", "version": "1.0.0"}
+        },
+        boto_session=boto_session,
+        session_id=None
+    )
+
+    # Server returns session ID in response header
+    session_id = headers.get('Mcp-Session-Id') or headers.get('mcp-session-id')
+    if session_id and 'error' not in result:
+        global_session_id = session_id
+        return session_id, boto_session
+
+    raise Exception(f"Failed to initialize global MCP session: {result}")
+
+
 def call_aws_mcp(
     tool_name: str,
     arguments: Dict[str, Any],
     account_id: str,
     region: str = "us-east-1"
 ) -> Dict[str, Any]:
-    """Call AWS MCP Server with SigV4 authentication."""
+    """Call AWS MCP Server with SigV4 authentication using account credentials."""
     creds = get_credentials(account_id)
 
     boto_session = boto3.Session(
@@ -137,6 +182,28 @@ def call_aws_mcp(
 
     # Get or create MCP session
     session_id = get_or_create_mcp_session(account_id, boto_session)
+
+    # Make tool call
+    result, _ = make_mcp_request(
+        method="tools/call",
+        params={"name": tool_name, "arguments": arguments},
+        boto_session=boto_session,
+        session_id=session_id
+    )
+    return result
+
+
+def call_aws_mcp_global(
+    tool_name: str,
+    arguments: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Call AWS MCP Server for global tools using Lambda's own credentials.
+
+    Global tools like documentation search and SOP retrieval don't need
+    account-specific credentials.
+    """
+    # Get or create global MCP session
+    session_id, boto_session = get_or_create_global_mcp_session()
 
     # Make tool call
     result, _ = make_mcp_request(
@@ -179,12 +246,19 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         tool_args = event.get('arguments', {})
         region = event.get('region', 'us-east-1')
 
-        if not account_id:
-            return {'error': 'Missing account_id'}
         if not mcp_tool:
             return {'error': 'Missing tool_name'}
 
         try:
+            # Global tools don't need account credentials
+            if mcp_tool in GLOBAL_TOOLS:
+                result = call_aws_mcp_global(mcp_tool, tool_args)
+                return result
+
+            # Account-specific tools require account_id
+            if not account_id:
+                return {'error': f'Missing account_id (required for {mcp_tool})'}
+
             result = call_aws_mcp(mcp_tool, tool_args, account_id, region)
             return result
         except Exception as e:
@@ -204,12 +278,19 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             tool_args = body.get('arguments', {})
             region = body.get('region', 'us-east-1')
 
-            if not account_id:
-                return {'statusCode': 400, 'body': json.dumps({'error': 'Missing account_id'})}
             if not mcp_tool:
                 return {'statusCode': 400, 'body': json.dumps({'error': 'Missing tool_name'})}
 
             try:
+                # Global tools don't need account credentials
+                if mcp_tool in GLOBAL_TOOLS:
+                    result = call_aws_mcp_global(mcp_tool, tool_args)
+                    return {'statusCode': 200, 'body': json.dumps(result, default=str)}
+
+                # Account-specific tools require account_id
+                if not account_id:
+                    return {'statusCode': 400, 'body': json.dumps({'error': f'Missing account_id (required for {mcp_tool})'})}
+
                 result = call_aws_mcp(mcp_tool, tool_args, account_id, region)
                 return {'statusCode': 200, 'body': json.dumps(result, default=str)}
             except Exception as e:

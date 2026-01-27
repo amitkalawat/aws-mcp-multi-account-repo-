@@ -47,20 +47,20 @@ export class GatewayStack extends cdk.Stack {
           lambda: {
             lambdaArn: props.bridgeLambda.functionArn,
             toolSchema: {
-              // Only expose the query tool - account management is done by agent via DynamoDB
+              // Query tool for AWS MCP Server access - supports both account-specific and global tools
               inlinePayload: [
                 {
                   name: 'query',
-                  description: 'Query a specific AWS account using AWS MCP Server tools. The agent must provide the account_id from its account registry (DynamoDB).',
+                  description: 'Query AWS resources or search AWS documentation. For account-specific operations (aws___call_aws), provide account_id. For global tools (aws___search_documentation, aws___read_documentation, aws___retrieve_agent_sop, aws___recommend, aws___suggest_aws_commands), account_id is optional.',
                   inputSchema: {
                     type: 'object',
                     properties: {
-                      account_id: { type: 'string', description: 'AWS account ID to query' },
-                      tool_name: { type: 'string', description: 'AWS MCP tool name to invoke (e.g., aws___list_regions, aws___call_aws)' },
+                      account_id: { type: 'string', description: 'AWS account ID (required for aws___call_aws and aws___list_regions, optional for documentation/SOP tools)' },
+                      tool_name: { type: 'string', description: 'AWS MCP tool: aws___call_aws, aws___list_regions, aws___search_documentation, aws___read_documentation, aws___retrieve_agent_sop, aws___recommend, aws___suggest_aws_commands' },
                       arguments: { type: 'object', description: 'Arguments for the MCP tool' },
                       region: { type: 'string', description: 'AWS region for the query (default: us-east-1)' },
                     },
-                    required: ['account_id', 'tool_name'],
+                    required: ['tool_name'],
                   },
                 },
               ],

@@ -97,20 +97,65 @@ def invoke_agent_with_gateway(prompt: str, access_token: str) -> str:
         accounts_list = "\n".join([f"- {a['name']} ({a['account_id']}) - {a['environment']}" for a in accounts])
         accounts_info = f"\n\nAvailable AWS accounts:\n{accounts_list}"
 
-    system_prompt = f"""You are a helpful AWS operations assistant that can query AWS resources across multiple accounts.
+    system_prompt = f"""You are a helpful AWS operations assistant that can query AWS resources across multiple accounts and search AWS documentation.
 
-You have access to tools from the Gateway. Use the bridge-lambda___query tool to query AWS resources.
+You have access to tools from the Gateway via bridge-lambda___query.
 
-When using bridge-lambda___query:
-- account_id: The 12-digit AWS account ID (see available accounts below)
-- tool_name: Use "aws___call_aws" for AWS CLI commands
+## Account-Specific Tools (require account_id)
+
+### aws___call_aws
+Execute AWS CLI commands in a specific account.
+- account_id: Required - The 12-digit AWS account ID
+- tool_name: "aws___call_aws"
 - arguments: {{"cli_command": "aws <service> <command>"}}
 - region: AWS region (default: us-east-1)
 
-Example: To list S3 buckets in account 878687028155:
-- tool_name: "aws___call_aws"
-- account_id: "878687028155"
-- arguments: {{"cli_command": "aws s3 ls"}}
+Example - List S3 buckets:
+  tool_name: "aws___call_aws", account_id: "878687028155", arguments: {{"cli_command": "aws s3 ls"}}
+
+### aws___list_regions
+List available AWS regions for an account.
+- account_id: Required
+- tool_name: "aws___list_regions"
+
+## Global Tools (no account_id needed)
+
+### aws___search_documentation
+Search AWS documentation for topics, services, or concepts.
+- tool_name: "aws___search_documentation"
+- arguments: {{"query": "search terms"}}
+
+Example: Search for Lambda best practices:
+  tool_name: "aws___search_documentation", arguments: {{"query": "Lambda best practices"}}
+
+### aws___read_documentation
+Read a specific AWS documentation page.
+- tool_name: "aws___read_documentation"
+- arguments: {{"url": "https://docs.aws.amazon.com/..."}}
+
+### aws___retrieve_agent_sop
+Get step-by-step Standard Operating Procedures for AWS tasks.
+- tool_name: "aws___retrieve_agent_sop"
+- arguments: {{"query": "task description"}} or {{"sop_id": "specific-sop-id"}}
+
+Example: Get SOP for VPC setup:
+  tool_name: "aws___retrieve_agent_sop", arguments: {{"query": "set up VPC with public and private subnets"}}
+
+### aws___suggest_aws_commands
+Get help with AWS CLI command syntax and usage.
+- tool_name: "aws___suggest_aws_commands"
+- arguments: {{"query": "what you want to do"}}
+
+Example: Get help with S3 sync:
+  tool_name: "aws___suggest_aws_commands", arguments: {{"query": "sync local folder to S3 bucket"}}
+
+### aws___recommend
+Get AWS documentation recommendations based on context.
+- tool_name: "aws___recommend"
+- arguments: {{"query": "topic or question"}}
+
+## Local Tools
+- **list_accounts**: List available AWS accounts from the registry
 {accounts_info}"""
 
     try:
