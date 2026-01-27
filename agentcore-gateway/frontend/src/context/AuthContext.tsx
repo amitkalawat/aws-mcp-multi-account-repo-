@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { getCurrentUser, signOut, fetchAuthSession, AuthUser } from 'aws-amplify/auth';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { getCurrentUser, signOut, fetchAuthSession, type AuthUser } from 'aws-amplify/auth';
 import { Hub } from 'aws-amplify/utils';
 
 interface AuthContextType {

@@ -60,6 +60,12 @@ export class RolesStack extends cdk.Stack {
       resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`],
     }));
 
+    // DynamoDB access for accounts table
+    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:Scan', 'dynamodb:Query'],
+      resources: ['arn:aws:dynamodb:*:*:table/central-ops-accounts-*'],
+    }));
+
     // ECR access for pulling container images
     this.runtimeRole.addToPolicy(new iam.PolicyStatement({
       actions: ['ecr:GetAuthorizationToken'],

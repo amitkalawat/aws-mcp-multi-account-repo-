@@ -1,14 +1,15 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { ChatContainer } from './components/ChatContainer';
 import { useAuth } from './hooks/useAuth';
-import { sendPrompt } from './api/runtime';
+import { sendPromptStreaming, type StreamChunk } from './api/runtime';
 import type { ChatMessage } from './types/runtime';
 
 function App() {
   const { isAuthenticated, isLoading: authLoading, getIdToken } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const assistantMessageRef = useRef<string>('');
 
   const handleSendMessage = useCallback(async (content: string) => {
     // Add user message
@@ -20,6 +21,17 @@ function App() {
     };
     setMessages((prev) => [...prev, userMessage]);
     setIsLoading(true);
+    assistantMessageRef.current = '';
+
+    // Create assistant message placeholder
+    const assistantId = crypto.randomUUID();
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, assistantMessage]);
 
     try {
       const token = await getIdToken();
@@ -27,25 +39,75 @@ function App() {
         throw new Error('Not authenticated');
       }
 
-      const response = await sendPrompt(content, token);
+      await sendPromptStreaming(content, token, (chunk: StreamChunk) => {
+        switch (chunk.type) {
+          case 'text':
+            if (chunk.content) {
+              assistantMessageRef.current += chunk.content;
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId
+                    ? { ...msg, content: assistantMessageRef.current }
+                    : msg
+                )
+              );
+            }
+            break;
 
-      // Add assistant message
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: response,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
+          case 'tool_call':
+            // Show tool call in progress
+            const toolCallText = `\n\n*Calling ${chunk.name}...*\n`;
+            assistantMessageRef.current += toolCallText;
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? { ...msg, content: assistantMessageRef.current }
+                  : msg
+              )
+            );
+            break;
+
+          case 'tool_result':
+            // Tool result received, model will continue
+            break;
+
+          case 'error':
+            assistantMessageRef.current += `\n\nError: ${chunk.content}`;
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? { ...msg, content: assistantMessageRef.current }
+                  : msg
+              )
+            );
+            break;
+
+          case 'done':
+            // Streaming complete
+            break;
+        }
+      });
+
+      // If no content was streamed, show a default message
+      if (!assistantMessageRef.current) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId
+              ? { ...msg, content: 'No response received.' }
+              : msg
+          )
+        );
+      }
     } catch (err) {
-      // Add error as assistant message
-      const errorMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      // Update assistant message with error
+      const errorContent = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? { ...msg, content: errorContent }
+            : msg
+        )
+      );
     } finally {
       setIsLoading(false);
     }

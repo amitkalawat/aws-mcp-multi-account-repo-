@@ -28,7 +28,7 @@ export class RuntimeStack extends cdk.Stack {
       roleArn: props.runtimeRole.roleArn,
       agentRuntimeArtifact: {
         containerConfiguration: {
-          containerUri: `${props.repository.repositoryUri}:latest`,
+          containerUri: `${props.repository.repositoryUri}:v20260127154736`,
         },
       },
       networkConfiguration: {
@@ -44,9 +44,8 @@ export class RuntimeStack extends cdk.Stack {
       authorizerConfiguration: {
         customJwtAuthorizer: {
           discoveryUrl: props.cognitoDiscoveryUrl,
-          // Cognito ID tokens have 'aud' claim set to the client ID
+          // Cognito ID tokens have 'aud' claim (not 'client_id'), so only use allowedAudience
           allowedAudience: [props.cognitoClientId],
-          allowedClients: [props.cognitoClientId],
         },
       },
     });
