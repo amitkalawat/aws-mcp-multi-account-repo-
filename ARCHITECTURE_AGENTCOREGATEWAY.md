@@ -2,7 +2,9 @@
 
 ## Overview
 
-This document describes an alternative architecture using **AgentCore Gateway** with a **Lambda-based bridge** to call the AWS MCP Server. Since Gateway supports **SigV4 for Lambda targets**, this is simpler than using OAuth for MCP server targets.
+This document describes the architecture using **AgentCore Gateway** with a **Lambda-based bridge** to call the AWS MCP Server. Since Gateway supports **SigV4 for Lambda targets**, this is simpler than using OAuth for MCP server targets.
+
+> **Implementation Status**: Fully implemented with AWS CDK (TypeScript). See `agentcore-gateway/` for the complete working code and `agentcore-gateway/README.md` for deployment instructions.
 
 ---
 
@@ -96,19 +98,31 @@ Deploy a **Lambda function** that:
 
 ## Implementation
 
+> **Note**: The implementation uses AWS CDK (TypeScript) instead of CloudFormation YAML.
+> The examples below show the architectural concepts; see `agentcore-gateway/infrastructure/lib/` for the actual CDK code.
+
 ### Project Structure
 
 ```
-aws-mcp-multi-account-gateway/
+agentcore-gateway/
+├── agent/
+│   ├── central_ops_agent.py         # Agent code (Bedrock Converse API)
+│   ├── Dockerfile                   # Container for AgentCore Runtime
+│   └── requirements.txt
 ├── infrastructure/
-│   ├── gateway.yaml                 # AgentCore Gateway
-│   ├── bridge-lambda.yaml           # Bridge Lambda function
-│   ├── cognito.yaml                 # Cognito for inbound auth
-│   └── member-account-role.yaml     # StackSet for member roles
+│   ├── bin/infrastructure.ts        # CDK app entry point
+│   ├── lib/
+│   │   ├── cognito-stack.ts         # Cognito User Pool
+│   │   ├── lambda-stack.ts          # Bridge Lambda function
+│   │   ├── roles-stack.ts           # Gateway and Runtime IAM roles
+│   │   ├── member-account-stack.ts  # Member account target role
+│   │   ├── ecr-stack.ts             # ECR repository for agent container
+│   │   ├── gateway-stack.ts         # AgentCore Gateway and Lambda target
+│   │   └── runtime-stack.ts         # AgentCore Runtime and endpoint
+│   └── config/accounts.json         # Account configuration (gitignored)
 ├── lambda/
 │   └── handler.py                   # Bridge Lambda code
-└── scripts/
-    └── deploy.sh
+└── tests/
 ```
 
 ---
@@ -197,259 +211,132 @@ def call_aws_mcp(tool_name: str, arguments: dict, account_id: str, region: str =
 
 
 def handler(event, context):
-    """Lambda handler for Gateway invocations."""
-    body = json.loads(event.get('body', '{}'))
-    action = body.get('action')
+    """Lambda handler for Gateway invocations.
+
+    Gateway format:
+    - event = tool arguments directly (e.g., {"account_id": "123", "tool_name": "aws___list_regions"})
+    - context.client_context.custom contains bedrockAgentCoreToolName
+    """
     accounts = json.loads(os.environ.get('TARGET_ACCOUNTS', '[]'))
 
-    if action == 'list_accounts':
-        return {'statusCode': 200, 'body': json.dumps(accounts)}
+    # Get tool name from Gateway context
+    tool_name = None
+    if hasattr(context, 'client_context') and context.client_context:
+        custom = getattr(context.client_context, 'custom', None)
+        if custom and 'bedrockAgentCoreToolName' in custom:
+            full_tool_name = custom['bedrockAgentCoreToolName']
+            # Strip target prefix (e.g., "bridge-lambda___query" -> "query")
+            tool_name = full_tool_name.split('___', 1)[1] if '___' in full_tool_name else full_tool_name
 
-    elif action == 'query':
+    if tool_name == 'list_accounts':
+        return accounts  # Gateway expects direct return, not statusCode wrapper
+
+    elif tool_name == 'query':
         result = call_aws_mcp(
-            tool_name=body['tool_name'],
-            arguments=body.get('arguments', {}),
-            account_id=body['account_id'],
-            region=body.get('region', 'us-east-1')
+            tool_name=event.get('tool_name'),
+            arguments=event.get('arguments', {}),
+            account_id=event.get('account_id'),
+            region=event.get('region', 'us-east-1')
         )
-        return {'statusCode': 200, 'body': json.dumps(result, default=str)}
+        return result
 
-    elif action == 'query_all':
+    elif tool_name == 'query_all':
         results = {}
         for acc in accounts:
             try:
                 result = call_aws_mcp(
-                    tool_name=body['tool_name'],
-                    arguments=body.get('arguments', {}),
+                    tool_name=event.get('tool_name'),
+                    arguments=event.get('arguments', {}),
                     account_id=acc['id'],
-                    region=body.get('region', 'us-east-1')
+                    region=event.get('region', 'us-east-1')
                 )
                 results[acc['id']] = {'status': 'success', 'data': result}
             except Exception as e:
                 results[acc['id']] = {'status': 'error', 'error': str(e)}
-        return {'statusCode': 200, 'body': json.dumps(results, default=str)}
+        return results
 
-    return {'statusCode': 400, 'body': json.dumps({'error': 'Unknown action'})}
+    return {'error': f'Unknown tool: {tool_name}'}
 ```
 
 ---
 
-### Infrastructure: Bridge Lambda
+### CDK Infrastructure
 
-**File: `infrastructure/bridge-lambda.yaml`**
+The infrastructure is implemented in TypeScript CDK. Key stacks:
 
-```yaml
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Bridge Lambda for AWS MCP Server access
+**`lib/lambda-stack.ts`** - Creates the Bridge Lambda with:
+- Cross-account AssumeRole permissions
+- AWS MCP access permissions (`aws-mcp:InvokeMcp`, `aws-mcp:CallReadOnlyTool`)
+- Python 3.12 runtime with 120s timeout
 
-Parameters:
-  TargetAccounts:
-    Type: String
-    Description: JSON array of target accounts
-  OrganizationId:
-    Type: String
+**`lib/gateway-stack.ts`** - Creates AgentCore Gateway with:
+- MCP protocol type
+- JWT authorizer (Cognito)
+- Lambda target with tool schemas for `list_accounts`, `query`, `query_all`
 
-Resources:
-  BridgeLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: BridgeLambdaRole
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: CrossAccountAssume
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: sts:AssumeRole
-                Resource: arn:aws:iam::*:role/CentralOpsTargetRole
-                Condition:
-                  StringEquals:
-                    aws:PrincipalOrgID: !Ref OrganizationId
-        - PolicyName: AWSMCPAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: aws-mcp:*
-                Resource: '*'
+**`lib/cognito-stack.ts`** - Creates Cognito User Pool with:
+- Password auth flow for testing
+- OIDC discovery URL for JWT validation
 
-  BridgeLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: aws-mcp-bridge
-      Runtime: python3.12
-      Handler: handler.handler
-      Role: !GetAtt BridgeLambdaRole.Arn
-      Timeout: 120
-      MemorySize: 256
-      Environment:
-        Variables:
-          TARGET_ACCOUNTS: !Ref TargetAccounts
-      Code:
-        ZipFile: |
-          # Inline code or use S3 bucket for deployment
-
-Outputs:
-  LambdaArn:
-    Value: !GetAtt BridgeLambda.Arn
-```
-
----
-
-### Infrastructure: AgentCore Gateway
-
-**File: `infrastructure/gateway.yaml`**
-
-```yaml
-AWSTemplateFormatVersion: '2010-09-09'
-Description: AgentCore Gateway with Lambda Bridge
-
-Parameters:
-  CognitoUserPoolId:
-    Type: String
-  CognitoClientId:
-    Type: String
-  BridgeLambdaArn:
-    Type: String
-
-Resources:
-  GatewayServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: CentralOpsGatewayRole
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: bedrock-agentcore.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: InvokeBridgeLambda
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !Ref BridgeLambdaArn
-
-Outputs:
-  GatewayRoleArn:
-    Value: !GetAtt GatewayServiceRole.Arn
-```
-
----
-
-### Infrastructure: Cognito (Inbound Auth Only)
-
-**File: `infrastructure/cognito.yaml`**
-
-```yaml
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Cognito for Gateway inbound authentication
-
-Resources:
-  UserPool:
-    Type: AWS::Cognito::UserPool
-    Properties:
-      UserPoolName: CentralOpsUserPool
-      Policies:
-        PasswordPolicy:
-          MinimumLength: 8
-
-  UserClient:
-    Type: AWS::Cognito::UserPoolClient
-    Properties:
-      UserPoolId: !Ref UserPool
-      ClientName: UserClient
-      GenerateSecret: false
-      ExplicitAuthFlows:
-        - ALLOW_USER_PASSWORD_AUTH
-        - ALLOW_REFRESH_TOKEN_AUTH
-
-Outputs:
-  UserPoolId:
-    Value: !Ref UserPool
-  UserClientId:
-    Value: !Ref UserClient
-  DiscoveryUrl:
-    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}/.well-known/openid-configuration"
-```
+See `agentcore-gateway/infrastructure/lib/` for the complete CDK code.
 
 ---
 
 ## Deployment
 
-### 1. Deploy Cognito
+The entire infrastructure is deployed with a single CDK command:
 
 ```bash
-aws cloudformation deploy \
-  --stack-name central-ops-cognito \
-  --template-file infrastructure/cognito.yaml
+cd agentcore-gateway/infrastructure
+
+# Install dependencies
+npm install
+
+# Bootstrap CDK (first time only)
+npx cdk bootstrap
+
+# Deploy all 6 stacks
+npx cdk deploy --all -c region=us-west-2 -c centralAccountId=YOUR_ACCOUNT_ID
 ```
 
-### 2. Deploy Bridge Lambda
+This deploys:
+1. **CognitoStack** - User Pool and Client for JWT authentication
+2. **LambdaStack** - Bridge Lambda function with cross-account permissions
+3. **RolesStack** - Gateway and Runtime IAM roles
+4. **EcrStack** - ECR repository for agent container
+5. **GatewayStack** - AgentCore Gateway with Lambda target and JWT authorizer
+6. **MemberAccountStack** - Target role for cross-account access
 
-```bash
-aws cloudformation deploy \
-  --stack-name central-ops-bridge \
-  --template-file infrastructure/bridge-lambda.yaml \
-  --parameter-overrides \
-    TargetAccounts='[{"id":"222222222222","name":"Production"},{"id":"333333333333","name":"Staging"}]' \
-    OrganizationId=o-xxxxxxxxxx \
-  --capabilities CAPABILITY_NAMED_IAM
-```
-
-### 3. Create Gateway with Lambda Target
-
-```bash
-# Create Gateway
-aws bedrock-agentcore-control create-gateway \
-  --gateway-name central-ops-gateway \
-  --role-arn $GATEWAY_ROLE_ARN \
-  --authorizer-configuration '{
-    "customJWTAuthorizer": {
-      "discoveryUrl": "'$DISCOVERY_URL'",
-      "allowedClients": ["'$USER_CLIENT_ID'"]
-    }
-  }'
-
-# Add Lambda as target
-aws bedrock-agentcore-control create-gateway-target \
-  --gateway-identifier central-ops-gateway \
-  --name bridge-lambda \
-  --target-configuration '{
-    "lambdaTargetConfiguration": {
-      "lambdaArn": "'$BRIDGE_LAMBDA_ARN'"
-    }
-  }'
-```
+See `agentcore-gateway/README.md` for detailed deployment instructions and testing.
 
 ---
 
-## Comparison: All Three Approaches
+## Comparison: Implementation Approaches
 
-| Aspect | Direct Proxy | MCP Server + OAuth | **Lambda Bridge** |
-|--------|--------------|--------------------|--------------------|
-| **Complexity** | Low | High | **Medium** |
-| **OAuth Setup** | None | Required | **None** |
-| **Gateway Auth to Target** | N/A | OAuth | **SigV4 (auto)** |
-| **Cold Start** | No | No | **Yes** |
-| **Extra Components** | Bundled proxy | OAuth provider + MCP server | **Lambda only** |
-| **Best For** | Single agent | Complex auth needs | **Gateway + simplicity** |
+| Aspect | Direct Proxy | **Lambda Bridge (CDK)** |
+|--------|--------------|-------------------------|
+| **Infrastructure** | None (IAM only) | 6 CDK stacks (fully automated) |
+| **Deployment** | Run anywhere | `npx cdk deploy --all` |
+| **OAuth Setup** | None | None (uses Cognito JWT) |
+| **Gateway Auth** | N/A | SigV4 (automatic) |
+| **Cold Start** | No | Yes (mitigatable) |
+| **Managed Infrastructure** | No | Yes (AgentCore) |
+| **Multi-tenant** | No | Yes (Cognito users) |
+| **Best For** | Local dev, simple | Production, enterprise |
 
 ---
+
+## Key Learnings from Implementation
+
+- **CDK Version**: Requires `aws-cdk-lib` version 2.236.0+ for `aws-bedrockagentcore` module
+- **JWT Auth**: For Cognito ID tokens, only configure `allowedAudience` (not `allowedClients`) - ID tokens have `aud` claim but not `client_id`
+- **Gateway Event Format**: When Gateway invokes Lambda, arguments are in `event` directly, tool name is in `context.client_context.custom['bedrockAgentCoreToolName']`
+- **MCP Sessions**: AWS MCP Server requires `initialize` before `tools/call` - Lambda must maintain session IDs
+- **Region**: AWS MCP Server is only available in `us-east-1` - Lambda signs requests to this region regardless of deployment region
 
 ## References
 
-- [AgentCore Gateway Outbound Auth](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-outbound-auth.html)
+- [AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html)
+- [AgentCore Gateway Lambda Targets](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-lambda.html)
 - [AWS MCP Server](https://docs.aws.amazon.com/aws-mcp/latest/userguide/what-is-mcp-server.html)
+- [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html)
