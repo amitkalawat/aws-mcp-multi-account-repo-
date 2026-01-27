@@ -33,10 +33,16 @@ export class RolesStack extends cdk.Stack {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
     });
 
-    // Bedrock access
+    // Bedrock access - foundation models (all regions for cross-region inference)
     this.runtimeRole.addToPolicy(new iam.PolicyStatement({
       actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-      resources: [`arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-*`],
+      resources: ['arn:aws:bedrock:*::foundation-model/anthropic.claude-*'],
+    }));
+
+    // Bedrock access - cross-region inference profiles (us.* models)
+    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+      resources: [`arn:aws:bedrock:*:${this.account}:inference-profile/*`],
     }));
 
     // AgentCore Identity access

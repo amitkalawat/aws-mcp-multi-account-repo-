@@ -1,9 +1,11 @@
 export interface RuntimeRequest {
   prompt: string;
+  access_token: string;
 }
 
 export interface RuntimeResponse {
-  response: string;
+  response?: string;
+  error?: string;
 }
 
 export interface ChatMessage {

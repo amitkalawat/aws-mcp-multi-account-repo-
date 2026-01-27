@@ -16,6 +16,8 @@ Multi-account AWS operations agent with two approaches:
 - `npx cdk deploy -c deployRuntime=true -c deployFrontend=true CentralOps-Frontend-dev` - Deploy Frontend stack
 - `cd agentcore-gateway/frontend && npm run build && ./scripts/deploy.sh` - Build and deploy frontend to S3/CloudFront
 - `aws dynamodb scan --table-name central-ops-accounts-dev --region us-east-1` - List registered accounts
+- `aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id centralOpsAgentdev-9dFwbQG3UU --region us-east-1` - Check runtime status
+- `aws logs tail "/aws/lambda/aws-mcp-bridge-dev" --region us-east-1 --since 15m` - Check Lambda bridge logs
 
 ## AgentCore Gateway Architecture
 - Gateway created via CDK `CfnGateway` (requires aws-cdk-lib 2.236.0+)
@@ -47,6 +49,10 @@ Multi-account AWS operations agent with two approaches:
 - Gateway JWT auth: configure ONLY `allowedAudience` for Cognito ID tokens (not allowedClients)
 - Lambda Gateway targets: arguments in event, tool name in `context.client_context.custom['bedrockAgentCoreToolName']`
 - AWS MCP `aws___call_aws`: requires `cli_command` param starting with "aws"
+- **Runtime session ID**: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header must be >= 33 chars
+- **Runtime logs empty**: Check Lambda bridge logs instead (`/aws/lambda/aws-mcp-bridge-dev`)
+- **Frontend token passing**: Agent expects `access_token` in request body (not just Authorization header)
+- **CloudFront cache**: Wait ~30s after invalidation before testing new frontend deploys
 
 ## Deployment
 After `cdk deploy --all`, get resource IDs from stack outputs (use `--region us-east-1`):
@@ -69,3 +75,5 @@ After `cdk deploy --all`, get resource IDs from stack outputs (use `--region us-
 - Amplify Auth for Cognito OAuth (PKCE flow via Hosted UI)
 - Create `.env` from stack outputs before building (VITE_* variables)
 - Test user: `aws cognito-idp admin-set-user-password --user-pool-id POOL_ID --username USER --password "Pass123!" --permanent`
+- Get test token: `aws cognito-idp admin-initiate-auth --user-pool-id POOL_ID --client-id CLIENT_ID --auth-flow ADMIN_NO_SRP_AUTH --auth-parameters "USERNAME=email,PASSWORD=pass" --region us-east-1`
+- Test runtime API directly with curl using ID token from above

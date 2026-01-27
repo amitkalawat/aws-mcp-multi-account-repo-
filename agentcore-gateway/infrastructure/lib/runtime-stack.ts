@@ -28,7 +28,7 @@ export class RuntimeStack extends cdk.Stack {
       roleArn: props.runtimeRole.roleArn,
       agentRuntimeArtifact: {
         containerConfiguration: {
-          containerUri: `${props.repository.repositoryUri}:v20260127155743`,
+          containerUri: `${props.repository.repositoryUri}:v20260127165112`,
         },
       },
       networkConfiguration: {
@@ -38,7 +38,7 @@ export class RuntimeStack extends cdk.Stack {
       environmentVariables: {
         GATEWAY_URL: props.gatewayUrl,
         AWS_REGION: this.region,
-        MODEL_ID: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+        MODEL_ID: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
         ACCOUNTS_TABLE_NAME: props.accountsTableName,
       },
       authorizerConfiguration: {

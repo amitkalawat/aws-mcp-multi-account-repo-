@@ -1,148 +1,164 @@
 import { useState, useCallback, useRef } from 'react';
-import { Header } from './components/Header';
-import { ChatContainer } from './components/ChatContainer';
-import { useAuth } from './hooks/useAuth';
-import { sendPromptStreaming, type StreamChunk } from './api/runtime';
-import type { ChatMessage } from './types/runtime';
+import { useAuth } from './context/AuthContext';
+import { sendPromptStreaming } from './api/runtime';
+import { signInWithRedirect } from 'aws-amplify/auth';
+import './App.css';
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 function App() {
-  const { isAuthenticated, isLoading: authLoading, getIdToken } = useAuth();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const { isAuthenticated, isLoading: authLoading, getIdToken, signOut, user } = useAuth();
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const assistantMessageRef = useRef<string>('');
+  const contentRef = useRef('');
 
-  const handleSendMessage = useCallback(async (content: string) => {
-    // Add user message
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
+  const handleSend = useCallback(async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage: Message = {
+      id: `user-${Date.now()}`,
       role: 'user',
-      content,
-      timestamp: new Date(),
+      content: input.trim(),
     };
-    setMessages((prev) => [...prev, userMessage]);
-    setIsLoading(true);
-    assistantMessageRef.current = '';
 
-    // Create assistant message placeholder
-    const assistantId = crypto.randomUUID();
-    const assistantMessage: ChatMessage = {
+    const assistantId = `assistant-${Date.now()}`;
+    contentRef.current = '';
+
+    setMessages(prev => [...prev, userMessage, {
       id: assistantId,
       role: 'assistant',
       content: '',
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, assistantMessage]);
+    }]);
+    setInput('');
+    setIsLoading(true);
 
     try {
       const token = await getIdToken();
       if (!token) {
-        throw new Error('Not authenticated');
-      }
-
-      await sendPromptStreaming(content, token, (chunk: StreamChunk) => {
-        switch (chunk.type) {
-          case 'text':
-            if (chunk.content) {
-              assistantMessageRef.current += chunk.content;
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === assistantId
-                    ? { ...msg, content: assistantMessageRef.current }
-                    : msg
-                )
-              );
-            }
-            break;
-
-          case 'tool_call':
-            // Show tool call in progress
-            const toolCallText = `\n\n*Calling ${chunk.name}...*\n`;
-            assistantMessageRef.current += toolCallText;
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? { ...msg, content: assistantMessageRef.current }
-                  : msg
-              )
-            );
-            break;
-
-          case 'tool_result':
-            // Tool result received, model will continue
-            break;
-
-          case 'error':
-            assistantMessageRef.current += `\n\nError: ${chunk.content}`;
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantId
-                  ? { ...msg, content: assistantMessageRef.current }
-                  : msg
-              )
-            );
-            break;
-
-          case 'done':
-            // Streaming complete
-            break;
-        }
-      });
-
-      // If no content was streamed, show a default message
-      if (!assistantMessageRef.current) {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantId
-              ? { ...msg, content: 'No response received.' }
-              : msg
-          )
-        );
-      }
-    } catch (err) {
-      // Update assistant message with error
-      const errorContent = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
-      setMessages((prev) =>
-        prev.map((msg) =>
+        setMessages(prev => prev.map(msg =>
           msg.id === assistantId
-            ? { ...msg, content: errorContent }
+            ? { ...msg, content: 'Error: Not authenticated. Please sign in again.' }
             : msg
-        )
+        ));
+        setIsLoading(false);
+        return;
+      }
+
+      await sendPromptStreaming(
+        userMessage.content,
+        token,
+        // onText - called when text content arrives
+        (text) => {
+          contentRef.current = text;
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantId
+              ? { ...msg, content: text }
+              : msg
+          ));
+        },
+        // onError - called on error
+        (error) => {
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantId
+              ? { ...msg, content: `Error: ${error}` }
+              : msg
+          ));
+        },
+        // onDone - called when streaming completes
+        () => {
+          if (!contentRef.current) {
+            setMessages(prev => prev.map(msg =>
+              msg.id === assistantId
+                ? { ...msg, content: 'No response received.' }
+                : msg
+            ));
+          }
+          setIsLoading(false);
+        }
       );
-    } finally {
+    } catch (err) {
+      console.error('Error:', err);
+      setMessages(prev => prev.map(msg =>
+        msg.id === assistantId
+          ? { ...msg, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }
+          : msg
+      ));
       setIsLoading(false);
     }
-  }, [getIdToken]);
+  }, [input, isLoading, getIdToken]);
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
 
   if (authLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-lg text-gray-600">Loading...</div>
+      <div className="loading">
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="login-container">
+        <h1>Central Ops Agent</h1>
+        <p>Multi-account AWS operations assistant</p>
+        <button onClick={() => signInWithRedirect()} className="login-btn">
+          Sign In with Cognito
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Header />
-      <main className="max-w-4xl mx-auto">
-        {isAuthenticated ? (
-          <ChatContainer
-            messages={messages}
-            onSendMessage={handleSendMessage}
-            isLoading={isLoading}
-          />
-        ) : (
-          <div className="px-4 py-8">
-            <div className="bg-white shadow rounded-lg p-6 text-center">
-              <h2 className="text-lg font-medium text-gray-900 mb-4">
-                Welcome to Central Ops Agent
-              </h2>
-              <p className="text-gray-600 mb-4">
-                Sign in to chat with the agent and query AWS resources across your accounts.
-              </p>
+    <div className="app">
+      <header className="header">
+        <h1>Central Ops Agent</h1>
+        <div className="user-info">
+          <span>{user?.signInDetails?.loginId || 'User'}</span>
+          <button onClick={signOut} className="signout-btn">Sign Out</button>
+        </div>
+      </header>
+
+      <main className="chat-container">
+        <div className="messages">
+          {messages.length === 0 && (
+            <div className="empty-state">
+              <p>Ask me about your AWS resources across accounts.</p>
+              <p className="hint">Try: "List S3 buckets in the Central account"</p>
             </div>
-          </div>
-        )}
+          )}
+          {messages.map(msg => (
+            <div key={msg.id} className={`message ${msg.role}`}>
+              <div className="message-content">
+                <pre>{msg.content || (isLoading && msg.role === 'assistant' ? 'Thinking...' : '')}</pre>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="input-container">
+          <textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyPress={handleKeyPress}
+            placeholder="Ask about AWS resources..."
+            disabled={isLoading}
+            rows={2}
+          />
+          <button onClick={handleSend} disabled={isLoading || !input.trim()}>
+            {isLoading ? 'Sending...' : 'Send'}
+          </button>
+        </div>
       </main>
     </div>
   );

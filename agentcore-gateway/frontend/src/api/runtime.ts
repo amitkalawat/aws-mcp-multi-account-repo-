@@ -1,14 +1,19 @@
 import { RUNTIME_URL } from '../config/amplify';
-import type { RuntimeRequest, RuntimeResponse } from '../types/runtime';
 
 // Generate a unique session ID for the browser session (min 33 chars required)
 const SESSION_ID = `session-${Date.now()}-${crypto.randomUUID()}`;
 
+export interface ApiResponse {
+  response?: string;
+  error?: string;
+}
+
+// Non-streaming version (kept for fallback)
 export async function sendPrompt(
   prompt: string,
   idToken: string
-): Promise<string> {
-  const request: RuntimeRequest = { prompt };
+): Promise<ApiResponse> {
+  const requestBody = { prompt, access_token: idToken };
 
   const response = await fetch(RUNTIME_URL, {
     method: 'POST',
@@ -17,127 +22,159 @@ export async function sendPrompt(
       'Authorization': `Bearer ${idToken}`,
       'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': SESSION_ID,
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify(requestBody),
   });
 
+  const text = await response.text();
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Runtime request failed: ${response.status} - ${errorText}`);
+    return { error: `Request failed: ${response.status} - ${text}` };
   }
 
-  const data: RuntimeResponse = await response.json();
-  return data.response;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: `Failed to parse response: ${text}` };
+  }
 }
 
-export interface StreamChunk {
-  type: 'text' | 'tool_call' | 'tool_result' | 'error' | 'done';
-  content?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-  result?: string;
-}
-
+// Streaming version - calls onText callback as content arrives
 export async function sendPromptStreaming(
   prompt: string,
   idToken: string,
-  onChunk: (chunk: StreamChunk) => void
+  onText: (text: string) => void,
+  onError: (error: string) => void,
+  onDone: () => void
 ): Promise<void> {
-  const request: RuntimeRequest = { prompt };
+  console.log('Sending streaming prompt...');
 
-  const response = await fetch(RUNTIME_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${idToken}`,
-      'Accept': 'text/event-stream',
-      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': SESSION_ID,
-    },
-    body: JSON.stringify(request),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Runtime request failed: ${response.status} - ${errorText}`);
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('Response body is not readable');
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = '';
+  const requestBody = { prompt, access_token: idToken };
 
   try {
+    const response = await fetch(RUNTIME_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`,
+        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': SESSION_ID,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    console.log('Response status:', response.status);
+
+    if (!response.ok) {
+      const text = await response.text();
+      onError(`Request failed: ${response.status} - ${text}`);
+      onDone();
+      return;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      onError('Response body is not readable');
+      onDone();
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
+      console.log('Received chunk, buffer length:', buffer.length);
 
-      // Try to parse complete JSON objects from buffer
-      // The runtime may send multiple JSON objects in sequence
-      let startIndex = 0;
-      let braceCount = 0;
-      let inString = false;
-      let escapeNext = false;
+      // Try to extract complete JSON objects from buffer
+      const jsonObjects = extractJsonObjects(buffer);
 
-      for (let i = 0; i < buffer.length; i++) {
-        const char = buffer[i];
-
-        if (escapeNext) {
-          escapeNext = false;
-          continue;
+      for (const obj of jsonObjects.objects) {
+        console.log('Parsed object:', obj);
+        if (obj.response) {
+          onText(obj.response);
         }
-
-        if (char === '\\' && inString) {
-          escapeNext = true;
-          continue;
-        }
-
-        if (char === '"' && !escapeNext) {
-          inString = !inString;
-          continue;
-        }
-
-        if (inString) continue;
-
-        if (char === '{') {
-          if (braceCount === 0) startIndex = i;
-          braceCount++;
-        } else if (char === '}') {
-          braceCount--;
-          if (braceCount === 0) {
-            // Found complete JSON object
-            const jsonStr = buffer.substring(startIndex, i + 1);
-            try {
-              const chunk = JSON.parse(jsonStr) as StreamChunk;
-              onChunk(chunk);
-            } catch {
-              // If parsing fails, might be incomplete - keep in buffer
-              console.warn('Failed to parse chunk:', jsonStr);
-            }
-            buffer = buffer.substring(i + 1);
-            i = -1; // Reset loop
-          }
+        if (obj.error) {
+          onError(obj.error);
         }
       }
+
+      buffer = jsonObjects.remaining;
     }
 
-    // Handle any remaining content (non-streaming response fallback)
+    // Handle any remaining buffer content
     if (buffer.trim()) {
       try {
         const data = JSON.parse(buffer);
         if (data.response) {
-          // Non-streaming response format
-          onChunk({ type: 'text', content: data.response });
-          onChunk({ type: 'done' });
+          onText(data.response);
+        }
+        if (data.error) {
+          onError(data.error);
         }
       } catch {
-        console.warn('Unparsed buffer content:', buffer);
+        console.warn('Unparsed remaining buffer:', buffer);
       }
     }
-  } finally {
-    reader.releaseLock();
+
+    onDone();
+  } catch (err) {
+    console.error('Streaming error:', err);
+    onError(err instanceof Error ? err.message : 'Unknown error');
+    onDone();
   }
+}
+
+// Extract complete JSON objects from a buffer string
+function extractJsonObjects(buffer: string): { objects: ApiResponse[]; remaining: string } {
+  const objects: ApiResponse[] = [];
+  let remaining = buffer;
+
+  let braceCount = 0;
+  let startIndex = -1;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < remaining.length; i++) {
+    const char = remaining[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === '{') {
+      if (braceCount === 0) startIndex = i;
+      braceCount++;
+    } else if (char === '}') {
+      braceCount--;
+      if (braceCount === 0 && startIndex !== -1) {
+        const jsonStr = remaining.substring(startIndex, i + 1);
+        try {
+          const obj = JSON.parse(jsonStr);
+          objects.push(obj);
+          remaining = remaining.substring(i + 1);
+          // Reset for next object
+          i = -1;
+          startIndex = -1;
+        } catch {
+          // Incomplete JSON, keep in buffer
+        }
+      }
+    }
+  }
+
+  return { objects, remaining };
 }
