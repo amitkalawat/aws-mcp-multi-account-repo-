@@ -12,6 +12,8 @@ This implementation uses the AgentCore Gateway's Lambda target feature to bridge
 - Workload Identity for Runtime-to-Gateway authentication
 - Automatic SigV4 signing for Gateway-to-Lambda calls
 - Cross-account AWS resource queries via STS AssumeRole
+- DynamoDB-based account registry for dynamic account management
+- Simple Lambda bridge - no account configuration required in Lambda
 
 ## Architecture
 
@@ -25,12 +27,13 @@ This implementation uses the AgentCore Gateway's Lambda target feature to bridge
 |                                     | (CentralOpsAgent)|                       |
 |                                     +--------+---------+                       |
 |                                              |                                 |
-|                                              | Workload Identity Token         |
-|                                              v                                 |
-|                                     +------------------+                       |
-|                                     | AgentCore        |                       |
-|                                     | Gateway          |                       |
-|                                     +--------+---------+                       |
+|                      +------- Query accounts |                                 |
+|                      v                       | Workload Identity Token         |
+|              +---------------+               v                                 |
+|              |   DynamoDB    |      +------------------+                       |
+|              | (Account      |      | AgentCore        |                       |
+|              |  Registry)    |      | Gateway          |                       |
+|              +---------------+      +--------+---------+                       |
 |                                              |                                 |
 |                                              | SigV4 (automatic)               |
 |                                              v                                 |
@@ -68,6 +71,15 @@ This implementation uses the AgentCore Gateway's Lambda target feature to bridge
 | 2 | Runtime | Gateway | Workload Identity Token |
 | 3 | Gateway | Lambda | SigV4 (automatic via service role) |
 | 4 | Lambda | MCP Server | SigV4 (per-account credentials) |
+
+### Data Flow
+
+1. **Agent queries DynamoDB** to get list of accounts and map friendly names to account IDs
+2. **Agent calls Gateway** with `query` tool, passing `account_id`, `tool_name`, and `arguments`
+3. **Gateway invokes Lambda** with SigV4 (automatic via service role)
+4. **Lambda assumes target role** in the specified account using STS AssumeRole
+5. **Lambda calls AWS MCP Server** with the assumed credentials
+6. **MCP Server executes** the AWS CLI command and returns results
 
 ## Prerequisites
 
@@ -156,11 +168,12 @@ The CDK deployment creates:
 After deployment, populate the DynamoDB accounts table. The agent queries this table to get the list of accounts and map account names to IDs.
 
 ```bash
-# Add accounts to the DynamoDB table
+# Set region (same as deployment region)
+REGION="us-east-1"
 TABLE_NAME="central-ops-accounts-dev"
 
 # Example: Add production account
-aws dynamodb put-item --table-name $TABLE_NAME --item '{
+aws dynamodb put-item --table-name $TABLE_NAME --region $REGION --item '{
   "account_id": {"S": "222222222222"},
   "name": {"S": "Production"},
   "environment": {"S": "prod"},
@@ -169,16 +182,21 @@ aws dynamodb put-item --table-name $TABLE_NAME --item '{
 }'
 
 # Example: Add staging account
-aws dynamodb put-item --table-name $TABLE_NAME --item '{
+aws dynamodb put-item --table-name $TABLE_NAME --region $REGION --item '{
   "account_id": {"S": "333333333333"},
   "name": {"S": "Staging"},
   "environment": {"S": "staging"},
   "description": {"S": "Staging AWS account"},
   "enabled": {"BOOL": true}
 }'
+
+# List all accounts in the table
+aws dynamodb scan --table-name $TABLE_NAME --region $REGION \
+  --query 'Items[*].{AccountID:account_id.S,Name:name.S,Environment:environment.S}' \
+  --output table
 ```
 
-### 3. Deploy Runtime (Optional)
+### 4. Deploy Runtime (Optional)
 
 To deploy the AgentCore Runtime with the containerized agent:
 
@@ -281,30 +299,42 @@ npm test
 After deployment, test the Gateway directly:
 
 ```bash
+# Set region (stacks are deployed to us-east-1 by default)
+REGION="us-east-1"
+
 # Get stack outputs
 GATEWAY_URL=$(aws cloudformation describe-stacks --stack-name CentralOps-Gateway-dev \
-  --query 'Stacks[0].Outputs[?OutputKey==`GatewayUrl`].OutputValue' --output text)
+  --region $REGION --query 'Stacks[0].Outputs[?OutputKey==`GatewayUrl`].OutputValue' --output text)
 POOL_ID=$(aws cloudformation describe-stacks --stack-name CentralOps-Cognito-dev \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
+  --region $REGION --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
 CLIENT_ID=$(aws cloudformation describe-stacks --stack-name CentralOps-Cognito-dev \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)
+  --region $REGION --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)
 
 # Create test user (first time)
-aws cognito-idp admin-create-user --user-pool-id $POOL_ID --username test@example.com --temporary-password TempPass123! --message-action SUPPRESS
-aws cognito-idp admin-set-user-password --user-pool-id $POOL_ID --username test@example.com --password TestPass123! --permanent
+aws cognito-idp admin-create-user --user-pool-id $POOL_ID --username test@example.com \
+  --temporary-password TempPass123! --message-action SUPPRESS --region $REGION
+aws cognito-idp admin-set-user-password --user-pool-id $POOL_ID --username test@example.com \
+  --password TestPass123! --permanent --region $REGION
 
 # Get Cognito ID token
 TOKEN=$(aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
   --client-id $CLIENT_ID \
   --auth-parameters USERNAME=test@example.com,PASSWORD=TestPass123! \
+  --region $REGION \
   --query 'AuthenticationResult.IdToken' --output text)
 
-# Test Gateway - query AWS MCP Server
+# Test Gateway - query AWS MCP Server (list regions)
 curl -s -X POST "$GATEWAY_URL" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bridge-lambda___query","arguments":{"account_id":"YOUR_ACCOUNT_ID","tool_name":"aws___list_regions","arguments":{}}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bridge-lambda___query","arguments":{"account_id":"YOUR_ACCOUNT_ID","tool_name":"aws___list_regions","arguments":{}}}}' | jq .
+
+# Test Gateway - query AWS CLI command (list S3 buckets)
+curl -s -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bridge-lambda___query","arguments":{"account_id":"YOUR_ACCOUNT_ID","tool_name":"aws___call_aws","arguments":{"cli_command":"aws s3 ls"}}}}' | jq .
 ```
 
 ## CDK Stacks

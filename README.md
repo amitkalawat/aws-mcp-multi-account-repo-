@@ -26,14 +26,19 @@ Agent → mcp-proxy-for-aws → AWS MCP Server → Member Accounts
 
 ### AgentCore Gateway (`agentcore-gateway/`)
 
-Full AgentCore stack: Runtime Agent + Gateway + Lambda Bridge.
-Infrastructure fully automated with AWS CDK (TypeScript) - single command deploys all 6 stacks.
+Full AgentCore stack: Runtime Agent + Gateway + Lambda Bridge + DynamoDB for account management.
+Infrastructure fully automated with AWS CDK (TypeScript) - single command deploys all 7 stacks.
 
 ```
+                    ┌─────────────┐
+                    │  DynamoDB   │ (Account Registry)
+                    └──────┬──────┘
+                           │ Query accounts
+                           ▼
 Runtime (Agent) → Gateway → Lambda → AWS MCP Server → Member Accounts
 ```
 
-**Pros:** Managed infrastructure, auto-scaling, production-ready
+**Pros:** Managed infrastructure, auto-scaling, dynamic account management, production-ready
 **Cons:** More AWS resources, Lambda cold starts
 
 [→ AgentCore Gateway Documentation](agentcore-gateway/README.md)
@@ -107,8 +112,8 @@ The AWS MCP Server **only supports SigV4 authentication**, but AgentCore Gateway
 │   └── tests/                             # Unit tests
 ├── agentcore-gateway/                     # AgentCore Gateway implementation
 │   ├── agent/                             # Runtime agent code + Dockerfile
-│   ├── infrastructure/                    # CDK TypeScript (6 stacks)
-│   │   └── lib/                           # Cognito, Lambda, Roles, ECR, Gateway, Runtime
+│   ├── infrastructure/                    # CDK TypeScript (7 stacks)
+│   │   └── lib/                           # DynamoDB, Cognito, Lambda, Roles, ECR, Gateway, Runtime
 │   ├── lambda/                            # Lambda bridge function
 │   └── tests/                             # Unit tests
 ├── ARCHITECTURE.md                        # Direct proxy architecture details
