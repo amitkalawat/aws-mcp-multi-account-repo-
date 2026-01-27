@@ -28,7 +28,7 @@ export class RuntimeStack extends cdk.Stack {
       roleArn: props.runtimeRole.roleArn,
       agentRuntimeArtifact: {
         containerConfiguration: {
-          containerUri: `${props.repository.repositoryUri}:v20260127165112`,
+          containerUri: `${props.repository.repositoryUri}:v20260127181837`,
         },
       },
       networkConfiguration: {
