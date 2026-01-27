@@ -269,6 +269,8 @@ After deployment, test the Gateway directly:
 # Get stack outputs
 GATEWAY_URL=$(aws cloudformation describe-stacks --stack-name CentralOps-Gateway-dev \
   --query 'Stacks[0].Outputs[?OutputKey==`GatewayUrl`].OutputValue' --output text)
+POOL_ID=$(aws cloudformation describe-stacks --stack-name CentralOps-Cognito-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)
 CLIENT_ID=$(aws cloudformation describe-stacks --stack-name CentralOps-Cognito-dev \
   --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)
 
