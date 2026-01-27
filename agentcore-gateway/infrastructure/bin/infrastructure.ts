@@ -8,23 +8,22 @@ import { MemberAccountStack } from '../lib/member-account-stack';
 import { EcrStack } from '../lib/ecr-stack';
 import { RuntimeStack } from '../lib/runtime-stack';
 import { GatewayStack } from '../lib/gateway-stack';
-import * as fs from 'fs';
-import * as path from 'path';
+import { DynamoDBStack } from '../lib/dynamodb-stack';
 
 const app = new cdk.App();
 
 const environment = app.node.tryGetContext('environment') || 'dev';
 const region = app.node.tryGetContext('region') || 'us-east-1';
-
-// Load account configuration
-const configPath = path.join(__dirname, '../config/accounts.json');
-let targetAccounts = '[]';
-if (fs.existsSync(configPath)) {
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  targetAccounts = JSON.stringify(config.accounts.filter((a: any) => a.role !== 'central'));
-}
+const organizationId = app.node.tryGetContext('organizationId');
 
 const env = { region };
+
+// DynamoDB Stack for account mappings
+// Agent queries this table to get account list and map names to IDs
+const dynamodbStack = new DynamoDBStack(app, `CentralOps-DynamoDB-${environment}`, {
+  environment,
+  env,
+});
 
 // Cognito Stack
 const cognitoStack = new CognitoStack(app, `CentralOps-Cognito-${environment}`, {
@@ -32,10 +31,10 @@ const cognitoStack = new CognitoStack(app, `CentralOps-Cognito-${environment}`, 
   env,
 });
 
-// Lambda Stack
+// Lambda Stack - simple bridge, no account config needed
 const lambdaStack = new LambdaStack(app, `CentralOps-Lambda-${environment}`, {
   environment,
-  targetAccounts,
+  organizationId,
   env,
 });
 
@@ -46,6 +45,9 @@ const rolesStack = new RolesStack(app, `CentralOps-Roles-${environment}`, {
   env,
 });
 rolesStack.addDependency(lambdaStack);
+
+// Grant Runtime role access to DynamoDB accounts table
+dynamodbStack.accountsTable.grantReadData(rolesStack.runtimeRole);
 
 // Member Account Stack (target role for same account setup)
 // Deploy this to each member account that needs to be queried
@@ -88,10 +90,12 @@ if (deployRuntime) {
     gatewayUrl: gatewayStack.gatewayUrl,
     cognitoDiscoveryUrl: cognitoStack.discoveryUrl,
     cognitoClientId: cognitoStack.userPoolClient.userPoolClientId,
+    accountsTableName: dynamodbStack.accountsTable.tableName,
     env,
   });
   runtimeStack.addDependency(rolesStack);
   runtimeStack.addDependency(ecrStack);
   runtimeStack.addDependency(cognitoStack);
   runtimeStack.addDependency(gatewayStack);
+  runtimeStack.addDependency(dynamodbStack);
 }

@@ -47,41 +47,20 @@ export class GatewayStack extends cdk.Stack {
           lambda: {
             lambdaArn: props.bridgeLambda.functionArn,
             toolSchema: {
+              // Only expose the query tool - account management is done by agent via DynamoDB
               inlinePayload: [
                 {
-                  name: 'list_accounts',
-                  description: 'List all configured AWS accounts',
-                  inputSchema: {
-                    type: 'object',
-                    properties: {},
-                    required: [],
-                  },
-                },
-                {
                   name: 'query',
-                  description: 'Query a specific AWS account using AWS MCP Server tools',
+                  description: 'Query a specific AWS account using AWS MCP Server tools. The agent must provide the account_id from its account registry (DynamoDB).',
                   inputSchema: {
                     type: 'object',
                     properties: {
                       account_id: { type: 'string', description: 'AWS account ID to query' },
-                      tool_name: { type: 'string', description: 'AWS MCP tool name to invoke' },
-                      arguments: { type: 'object', description: 'Arguments for the tool' },
-                      region: { type: 'string', description: 'AWS region (default: us-east-1)' },
+                      tool_name: { type: 'string', description: 'AWS MCP tool name to invoke (e.g., aws___list_regions, aws___call_aws)' },
+                      arguments: { type: 'object', description: 'Arguments for the MCP tool' },
+                      region: { type: 'string', description: 'AWS region for the query (default: us-east-1)' },
                     },
                     required: ['account_id', 'tool_name'],
-                  },
-                },
-                {
-                  name: 'query_all',
-                  description: 'Query all configured AWS accounts using the same MCP tool',
-                  inputSchema: {
-                    type: 'object',
-                    properties: {
-                      tool_name: { type: 'string', description: 'AWS MCP tool name to invoke' },
-                      arguments: { type: 'object', description: 'Arguments for the tool' },
-                      region: { type: 'string', description: 'AWS region (default: us-east-1)' },
-                    },
-                    required: ['tool_name'],
                   },
                 },
               ],

@@ -1,12 +1,14 @@
 """
 Lambda Bridge for AWS MCP Server access.
 
-This Lambda function:
-1. Receives requests from AgentCore Gateway (SigV4 authenticated)
-2. Assumes IAM roles in target accounts
+This Lambda is a simple bridge that:
+1. Receives account_id and tool request from agent (via Gateway)
+2. Assumes IAM role in target account
 3. Calls AWS MCP Server with SigV4 signing
+4. Returns result
+
+Account management is handled by the agent (via DynamoDB), not this Lambda.
 """
-import os
 import json
 import boto3
 from datetime import datetime, timezone, timedelta
@@ -16,12 +18,15 @@ import urllib.request
 from typing import Dict, Any
 
 # AWS MCP Server is only available in us-east-1
-AWS_MCP_ENDPOINT = os.environ.get('AWS_MCP_ENDPOINT', 'https://aws-mcp.us-east-1.api.aws/mcp')
-AWS_MCP_REGION = 'us-east-1'  # MCP service region (not the target resource region)
-TARGET_ROLE_NAME = os.environ.get('TARGET_ROLE_NAME', 'CentralOpsTargetRole')
+AWS_MCP_ENDPOINT = 'https://aws-mcp.us-east-1.api.aws/mcp'
+AWS_MCP_REGION = 'us-east-1'
+TARGET_ROLE_NAME = 'CentralOpsTargetRole'
 
 # In-memory credential cache (persists across warm invocations)
 credential_cache: Dict[str, Dict] = {}
+
+# Session cache per account (for MCP session persistence)
+session_cache: Dict[str, str] = {}
 
 
 def get_credentials(account_id: str) -> Dict[str, Any]:
@@ -48,10 +53,6 @@ def get_credentials(account_id: str) -> Dict[str, Any]:
     }
     credential_cache[account_id] = creds
     return creds
-
-
-# Session cache per account (for MCP session persistence)
-session_cache: Dict[str, str] = {}
 
 
 def make_mcp_request(
@@ -97,7 +98,7 @@ def get_or_create_mcp_session(account_id: str, boto_session: 'boto3.Session') ->
     if account_id in session_cache:
         return session_cache[account_id]
 
-    # Initialize new MCP session (no session ID on first request)
+    # Initialize new MCP session
     result, headers = make_mcp_request(
         method="initialize",
         params={
@@ -106,7 +107,7 @@ def get_or_create_mcp_session(account_id: str, boto_session: 'boto3.Session') ->
             "clientInfo": {"name": "aws-mcp-bridge", "version": "1.0.0"}
         },
         boto_session=boto_session,
-        session_id=None  # Server will return session ID
+        session_id=None
     )
 
     # Server returns session ID in response header
@@ -148,112 +149,72 @@ def call_aws_mcp(
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Lambda handler for Gateway and direct invocations.
+    """Lambda handler - simple bridge for AWS MCP queries.
 
-    Gateway format (from AgentCore Gateway):
+    Gateway format:
     - event = tool arguments directly (e.g., {"account_id": "123", "tool_name": "aws___list_regions"})
-    - context.client_context.custom contains:
-      - bedrockAgentCoreToolName: "bridge-lambda___query"
-      - bedrockAgentCoreGatewayId, bedrockAgentCoreTargetId, etc.
+    - context.client_context.custom contains bedrockAgentCoreToolName
 
-    Direct invocation format:
-    - event = {"body": "{\"action\": \"list_accounts\"}"}
+    Required arguments:
+    - account_id: Target AWS account ID
+    - tool_name: MCP tool to call (e.g., "aws___list_regions")
+    - arguments: Tool arguments (optional, defaults to {})
+    - region: AWS region for the query (optional, defaults to "us-east-1")
     """
-    accounts = json.loads(os.environ.get('TARGET_ACCOUNTS', '[]'))
-
-    # Check if this is from AgentCore Gateway (has client_context with tool info)
+    # Check if this is from AgentCore Gateway
     tool_name = None
     if hasattr(context, 'client_context') and context.client_context:
         custom = getattr(context.client_context, 'custom', None)
         if custom and 'bedrockAgentCoreToolName' in custom:
             full_tool_name = custom['bedrockAgentCoreToolName']
-            # Strip target prefix (e.g., "bridge-lambda___query" -> "query")
             if '___' in full_tool_name:
                 tool_name = full_tool_name.split('___', 1)[1]
             else:
                 tool_name = full_tool_name
 
-    # Gateway invocation: event is the arguments, tool_name from context
-    if tool_name:
+    # Gateway invocation
+    if tool_name == 'query':
+        account_id = event.get('account_id')
+        mcp_tool = event.get('tool_name')
+        tool_args = event.get('arguments', {})
+        region = event.get('region', 'us-east-1')
+
+        if not account_id:
+            return {'error': 'Missing account_id'}
+        if not mcp_tool:
+            return {'error': 'Missing tool_name'}
+
         try:
-            if tool_name == 'list_accounts':
-                return accounts
-
-            elif tool_name == 'query':
-                account_id = event.get('account_id')
-                mcp_tool = event.get('tool_name')
-                tool_args = event.get('arguments', {})
-                region = event.get('region', 'us-east-1')
-
-                if not mcp_tool or not account_id:
-                    return {'error': 'Missing tool_name or account_id'}
-
-                result = call_aws_mcp(mcp_tool, tool_args, account_id, region)
-                return result
-
-            elif tool_name == 'query_all':
-                mcp_tool = event.get('tool_name')
-                tool_args = event.get('arguments', {})
-                region = event.get('region', 'us-east-1')
-
-                if not mcp_tool:
-                    return {'error': 'Missing tool_name'}
-
-                results = {}
-                for acc in accounts:
-                    try:
-                        result = call_aws_mcp(mcp_tool, tool_args, acc['id'], region)
-                        results[acc['id']] = {'status': 'success', 'data': result}
-                    except Exception as e:
-                        results[acc['id']] = {'status': 'error', 'error': str(e)}
-
-                return results
-
-            else:
-                return {'error': f'Unknown tool: {tool_name}'}
-
+            result = call_aws_mcp(mcp_tool, tool_args, account_id, region)
+            return result
         except Exception as e:
             return {'error': str(e)}
 
-    # Direct invocation format: event has 'body' field
-    try:
-        body = json.loads(event.get('body', '{}'))
-    except json.JSONDecodeError:
-        return {'statusCode': 400, 'body': json.dumps({'error': 'Invalid JSON body'})}
+    # Direct invocation (for testing)
+    if tool_name is None:
+        try:
+            body = json.loads(event.get('body', '{}'))
+        except json.JSONDecodeError:
+            return {'statusCode': 400, 'body': json.dumps({'error': 'Invalid JSON body'})}
 
-    action = body.get('action')
+        action = body.get('action')
+        if action == 'query':
+            account_id = body.get('account_id')
+            mcp_tool = body.get('tool_name')
+            tool_args = body.get('arguments', {})
+            region = body.get('region', 'us-east-1')
 
-    if action == 'list_accounts':
-        return {'statusCode': 200, 'body': json.dumps(accounts)}
+            if not account_id:
+                return {'statusCode': 400, 'body': json.dumps({'error': 'Missing account_id'})}
+            if not mcp_tool:
+                return {'statusCode': 400, 'body': json.dumps({'error': 'Missing tool_name'})}
 
-    elif action == 'query':
-        tool_name = body.get('tool_name')
-        account_id = body.get('account_id')
-        arguments = body.get('arguments', {})
-        region = body.get('region', 'us-east-1')
-
-        if not tool_name or not account_id:
-            return {'statusCode': 400, 'body': json.dumps({'error': 'Missing tool_name or account_id'})}
-
-        result = call_aws_mcp(tool_name, arguments, account_id, region)
-        return {'statusCode': 200, 'body': json.dumps(result, default=str)}
-
-    elif action == 'query_all':
-        tool_name = body.get('tool_name')
-        arguments = body.get('arguments', {})
-        region = body.get('region', 'us-east-1')
-
-        if not tool_name:
-            return {'statusCode': 400, 'body': json.dumps({'error': 'Missing tool_name'})}
-
-        results = {}
-        for acc in accounts:
             try:
-                result = call_aws_mcp(tool_name, arguments, acc['id'], region)
-                results[acc['id']] = {'status': 'success', 'data': result}
+                result = call_aws_mcp(mcp_tool, tool_args, account_id, region)
+                return {'statusCode': 200, 'body': json.dumps(result, default=str)}
             except Exception as e:
-                results[acc['id']] = {'status': 'error', 'error': str(e)}
+                return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
 
-        return {'statusCode': 200, 'body': json.dumps(results, default=str)}
+        return {'statusCode': 400, 'body': json.dumps({'error': f'Unknown action: {action}'})}
 
-    return {'statusCode': 400, 'body': json.dumps({'error': f'Unknown action: {action}'})}
+    return {'error': f'Unknown tool: {tool_name}'}

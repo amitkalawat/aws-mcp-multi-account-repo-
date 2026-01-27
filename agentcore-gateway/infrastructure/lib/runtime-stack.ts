@@ -11,6 +11,7 @@ export interface RuntimeStackProps extends cdk.StackProps {
   gatewayUrl: string;
   cognitoDiscoveryUrl: string;
   cognitoClientId: string;
+  accountsTableName: string;
 }
 
 export class RuntimeStack extends cdk.Stack {
@@ -38,6 +39,7 @@ export class RuntimeStack extends cdk.Stack {
         GATEWAY_URL: props.gatewayUrl,
         AWS_REGION: this.region,
         MODEL_ID: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+        ACCOUNTS_TABLE_NAME: props.accountsTableName,
       },
       authorizerConfiguration: {
         customJwtAuthorizer: {

@@ -1,4 +1,3 @@
-// agentcore-gateway/infrastructure/lib/lambda-stack.ts
 import * as cdk from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -8,7 +7,6 @@ import * as path from 'path';
 
 export interface LambdaStackProps extends cdk.StackProps {
   environment: string;
-  targetAccounts: string; // JSON string
   organizationId?: string;
 }
 
@@ -29,6 +27,7 @@ export class LambdaStack extends cdk.Stack {
     });
 
     // Cross-account assume role policy
+    // Lambda can assume CentralOpsTargetRole in any account
     const assumeRolePolicy = new iam.PolicyStatement({
       actions: ['sts:AssumeRole'],
       resources: ['arn:aws:iam::*:role/CentralOpsTargetRole'],
@@ -46,7 +45,7 @@ export class LambdaStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // Lambda function
+    // Lambda function - simple bridge, no account config needed
     this.bridgeLambda = new lambda.Function(this, 'BridgeLambda', {
       functionName: `aws-mcp-bridge-${props.environment}`,
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -55,15 +54,13 @@ export class LambdaStack extends cdk.Stack {
       role: this.bridgeLambdaRole,
       timeout: cdk.Duration.seconds(120),
       memorySize: 256,
-      environment: {
-        TARGET_ACCOUNTS: props.targetAccounts,
-        TARGET_ROLE_NAME: 'CentralOpsTargetRole',
-      },
+      // No environment variables needed - Lambda is a simple bridge
+      // Account management is handled by the agent via DynamoDB
       logRetention: logs.RetentionDays.TWO_WEEKS,
     });
 
     // Outputs
-    new cdk.CfnOutput(this, 'LambdaArn', { value: this.bridgeLambda.functionArn });
-    new cdk.CfnOutput(this, 'LambdaRoleArn', { value: this.bridgeLambdaRole.roleArn });
+    new cdk.CfnOutput(this, 'BridgeLambdaArn', { value: this.bridgeLambda.functionArn });
+    new cdk.CfnOutput(this, 'BridgeLambdaRoleArn', { value: this.bridgeLambdaRole.roleArn });
   }
 }
