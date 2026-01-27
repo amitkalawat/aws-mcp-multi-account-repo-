@@ -36,8 +36,9 @@ Multi-account AWS operations agent with two approaches:
 - Lambda Gateway targets: arguments in event, tool name in `context.client_context.custom['bedrockAgentCoreToolName']`
 - AWS MCP `aws___call_aws`: requires `cli_command` param starting with "aws"
 
-## Deployed Resources (us-west-2)
-- Gateway: `centralopsgatewaydev-cv4hmvkwce`
-- Gateway URL: `https://centralopsgatewaydev-cv4hmvkwce.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp`
-- Cognito User Pool: `us-west-2_MQN3BQWa2`
-- Cognito Client ID: `798pr5p3b8vl2mgospsqdjb05j`
+## Deployment
+After `cdk deploy`, get resource IDs from stack outputs:
+- `CentralOps-Gateway-dev.GatewayId` - Gateway identifier
+- `CentralOps-Gateway-dev.GatewayUrl` - Gateway MCP endpoint
+- `CentralOps-Cognito-dev.UserPoolId` - Cognito user pool
+- `CentralOps-Cognito-dev.UserPoolClientId` - Cognito client ID

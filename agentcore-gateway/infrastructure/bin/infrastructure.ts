@@ -49,8 +49,10 @@ rolesStack.addDependency(lambdaStack);
 
 // Member Account Stack (target role for same account setup)
 // Deploy this to each member account that needs to be queried
+// centralAccountId: Pass via context or use current account
+const centralAccountId = app.node.tryGetContext('centralAccountId') || process.env.CDK_DEFAULT_ACCOUNT;
 const memberStack = new MemberAccountStack(app, `CentralOps-MemberRole-${environment}`, {
-  centralAccountId: '878687028155',
+  centralAccountId: centralAccountId!,
   bridgeLambdaRoleArn: lambdaStack.bridgeLambdaRole.roleArn,
   env,
 });

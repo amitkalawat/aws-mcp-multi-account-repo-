@@ -17,6 +17,10 @@ credentials.json
 # Account registries with real IDs
 direct-proxy/infrastructure/account-registry.json
 agentcore-gateway/infrastructure/account-registry.json
+**/accounts.json
+
+# CDK output (contains account-specific ARNs)
+**/cdk.out/
 
 # Python
 __pycache__/
