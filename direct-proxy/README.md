@@ -56,7 +56,7 @@ This approach runs the agent locally (or in any compute environment like EC2, EC
 
 ## Prerequisites
 
-- **Python 3.12+** - For running the agent and tests
+- **Python 3.11+** - For running the agent and tests
 - **uv** - Package manager and tool runner (for `uvx` command)
 - **AWS CLI** - For credential management
 - **Valid AWS credentials** - With appropriate permissions
@@ -313,7 +313,7 @@ Stores account IDs and metadata. This file is gitignored to prevent exposing rea
 | Aspect | Direct Proxy | AgentCore Gateway |
 |--------|--------------|-------------------|
 | **Deployment** | Run anywhere | Managed Runtime |
-| **Infrastructure** | Minimal (IAM only) | CDK stacks (Cognito, Lambda, Roles) |
+| **Infrastructure** | Minimal (IAM only) | 6 CDK stacks (fully automated) |
 | **Authentication** | AWS credentials | JWT + Workload Identity |
 | **Scalability** | Manual | Managed |
 | **Client Access** | Direct | API with auth |
