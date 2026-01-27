@@ -11,12 +11,14 @@ Multi-account AWS operations agent with two approaches:
 - `pytest direct-proxy/tests/ -v` - Run direct-proxy tests
 - `python3 scripts/test_integration.py` - Run integration tests
 - `./scripts/verify_prerequisites.sh` - Check AWS CLI, uv, credentials, Python
-- `cd agentcore-gateway/infrastructure && npx cdk deploy --all -c region=us-west-2` - Deploy CDK stacks
+- `cd agentcore-gateway/infrastructure && npx cdk deploy --all` - Deploy 7 CDK stacks (deploys to us-east-1)
 - `npx cdk deploy -c deployRuntime=true CentralOps-Runtime-dev` - Deploy Runtime (after ECR image push)
+- `aws dynamodb scan --table-name central-ops-accounts-dev --region us-east-1` - List registered accounts
 
 ## AgentCore Gateway Architecture
 - Gateway created via CDK `CfnGateway` (requires aws-cdk-lib 2.236.0+)
-- Lambda bridge handles MCP tool calls to AWS MCP Server
+- Lambda bridge handles `query` tool calls to AWS MCP Server (simple bridge, no account config)
+- DynamoDB table `central-ops-accounts-{env}` stores account registry (agent queries this)
 - Cognito JWT authentication for Gateway access
 - AWS MCP Server only available in us-east-1 (Lambda signs requests cross-region)
 
@@ -25,8 +27,11 @@ Multi-account AWS operations agent with two approaches:
 - `agent/account_manager.py` - Credential caching and role assumption
 - `agentcore-gateway/infrastructure/` - CDK stacks for Gateway deployment
 - `agentcore-gateway/lambda/handler.py` - Lambda bridge for AWS MCP Server
+- `agentcore-gateway/infrastructure/lib/dynamodb-stack.ts` - Account registry table
 
 ## Gotchas
+- **Region mismatch**: Stacks deploy to us-east-1; always use `--region us-east-1` in AWS CLI commands
+- **Stale IAM roles**: If CDK fails with "role already exists", delete manually before retry
 - MCP protocol requires `initialize` before `tools/list` - one-shot calls fail
 - IAM role needs `aws-mcp:InvokeMcp`, `aws-mcp:CallReadOnlyTool`, `aws-mcp:CallReadWriteTool`
 - macOS Python is externally-managed; always use `.venv` for pip installs
@@ -37,8 +42,14 @@ Multi-account AWS operations agent with two approaches:
 - AWS MCP `aws___call_aws`: requires `cli_command` param starting with "aws"
 
 ## Deployment
-After `cdk deploy`, get resource IDs from stack outputs:
+After `cdk deploy --all`, get resource IDs from stack outputs (use `--region us-east-1`):
 - `CentralOps-Gateway-dev.GatewayId` - Gateway identifier
 - `CentralOps-Gateway-dev.GatewayUrl` - Gateway MCP endpoint
 - `CentralOps-Cognito-dev.UserPoolId` - Cognito user pool
 - `CentralOps-Cognito-dev.UserPoolClientId` - Cognito client ID
+- `CentralOps-DynamoDB-dev.AccountsTableName` - DynamoDB accounts table
+
+## Adding New Accounts
+1. Deploy `CentralOpsTargetRole` in member account (see README for CLI commands)
+2. Add to DynamoDB: `aws dynamodb put-item --table-name central-ops-accounts-dev --region us-east-1 --item '{"account_id":{"S":"ACCOUNT_ID"},"name":{"S":"Name"},"environment":{"S":"prod"},"enabled":{"BOOL":true}}'`
+3. Test: Query Gateway with new account_id
