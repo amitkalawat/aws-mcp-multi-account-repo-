@@ -9,6 +9,7 @@ import { EcrStack } from '../lib/ecr-stack';
 import { RuntimeStack } from '../lib/runtime-stack';
 import { GatewayStack } from '../lib/gateway-stack';
 import { DynamoDBStack } from '../lib/dynamodb-stack';
+import { FrontendStack } from '../lib/frontend-stack';
 
 const app = new cdk.App();
 
@@ -82,8 +83,9 @@ gatewayStack.addDependency(cognitoStack);
 // Runtime Stack for AgentCore Runtime
 // Set deployRuntime context to 'true' to deploy (requires container image in ECR)
 const deployRuntime = app.node.tryGetContext('deployRuntime') === 'true';
+let runtimeStack: RuntimeStack | undefined;
 if (deployRuntime) {
-  const runtimeStack = new RuntimeStack(app, `CentralOps-Runtime-${environment}`, {
+  runtimeStack = new RuntimeStack(app, `CentralOps-Runtime-${environment}`, {
     environment,
     runtimeRole: rolesStack.runtimeRole,
     repository: ecrStack.repository,
@@ -98,4 +100,19 @@ if (deployRuntime) {
   runtimeStack.addDependency(cognitoStack);
   runtimeStack.addDependency(gatewayStack);
   runtimeStack.addDependency(dynamodbStack);
+}
+
+// Frontend Stack (requires Runtime to be deployed)
+const deployFrontend = app.node.tryGetContext('deployFrontend') === 'true';
+if (deployFrontend && deployRuntime && runtimeStack) {
+  const frontendStack = new FrontendStack(app, `CentralOps-Frontend-${environment}`, {
+    environment,
+    runtimeInvocationUrl: `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodeURIComponent(runtimeStack.runtime.attrAgentRuntimeArn)}/invocations`,
+    cognitoUserPoolId: cognitoStack.userPool.userPoolId,
+    cognitoClientId: cognitoStack.userPoolClient.userPoolClientId,
+    cognitoDomain: `central-ops-${environment}.auth.${region}.amazoncognito.com`,
+    env,
+  });
+  frontendStack.addDependency(runtimeStack);
+  frontendStack.addDependency(cognitoStack);
 }
