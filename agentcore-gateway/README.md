@@ -406,42 +406,81 @@ aws cloudformation create-stack-set \
   --auto-deployment Enabled=true
 ```
 
-**Option B: Create role manually** (in member account AWS Console or CLI)
+**Option B: Create role manually via CLI** (run these commands in the MEMBER account)
+
+> **Note:** Replace `CENTRAL_ACCOUNT_ID` with your central account ID (the account where Lambda is deployed, e.g., `878687028155`)
 
 ```bash
-# Run this in the MEMBER account
-CENTRAL_ACCOUNT_ID="YOUR_CENTRAL_ACCOUNT_ID"
-LAMBDA_ROLE_ARN="arn:aws:iam::${CENTRAL_ACCOUNT_ID}:role/CentralOpsBridgeRole-dev"
+# ============================================
+# RUN THESE COMMANDS IN THE MEMBER ACCOUNT
+# ============================================
 
-# Create the role with trust policy
+# Set your central account ID (where Lambda is deployed)
+CENTRAL_ACCOUNT_ID="878687028155"  # <-- CHANGE THIS to your central account ID
+
+# Step 1: Create the trust policy file
+cat > /tmp/trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::${CENTRAL_ACCOUNT_ID}:role/CentralOpsBridgeRole-dev"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+# Step 2: Create the IAM role
 aws iam create-role \
   --role-name CentralOpsTargetRole \
-  --assume-role-policy-document "{
-    \"Version\": \"2012-10-17\",
-    \"Statement\": [{
-      \"Effect\": \"Allow\",
-      \"Principal\": {\"AWS\": \"${LAMBDA_ROLE_ARN}\"},
-      \"Action\": \"sts:AssumeRole\"
-    }]
-  }"
+  --assume-role-policy-document file:///tmp/trust-policy.json \
+  --description "Allows central ops Lambda to query this account via AWS MCP Server"
 
-# Attach ReadOnlyAccess policy
+# Step 3: Attach ReadOnlyAccess managed policy
 aws iam attach-role-policy \
   --role-name CentralOpsTargetRole \
   --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
 
-# Add AWS MCP permissions (inline policy)
+# Step 4: Create the MCP permissions policy file
+cat > /tmp/mcp-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "aws-mcp:InvokeMcp",
+        "aws-mcp:CallReadOnlyTool",
+        "aws-mcp:CallReadWriteTool"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+
+# Step 5: Add the MCP permissions as inline policy
 aws iam put-role-policy \
   --role-name CentralOpsTargetRole \
   --policy-name MCPAccess \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": ["aws-mcp:InvokeMcp", "aws-mcp:CallReadOnlyTool", "aws-mcp:CallReadWriteTool"],
-      "Resource": "*"
-    }]
-  }'
+  --policy-document file:///tmp/mcp-policy.json
+
+# Step 6: Verify the role was created correctly
+echo "=== Role created ==="
+aws iam get-role --role-name CentralOpsTargetRole --query 'Role.Arn' --output text
+
+echo "=== Attached policies ==="
+aws iam list-attached-role-policies --role-name CentralOpsTargetRole --output table
+
+echo "=== Inline policies ==="
+aws iam list-role-policies --role-name CentralOpsTargetRole --output table
+
+# Cleanup temp files
+rm -f /tmp/trust-policy.json /tmp/mcp-policy.json
 ```
 
 ### Step 2: Register Account in DynamoDB
