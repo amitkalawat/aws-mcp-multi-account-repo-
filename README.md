@@ -27,7 +27,7 @@ Agent → mcp-proxy-for-aws → AWS MCP Server → Member Accounts
 ### AgentCore Gateway (`agentcore-gateway/`)
 
 Full AgentCore stack: Runtime Agent + Gateway + Lambda Bridge.
-Infrastructure managed with AWS CDK (TypeScript).
+Infrastructure fully automated with AWS CDK (TypeScript) - single command deploys all 6 stacks.
 
 ```
 Runtime (Agent) → Gateway → Lambda → AWS MCP Server → Member Accounts
@@ -53,8 +53,10 @@ python3 scripts/test_integration.py
 ### AgentCore Gateway (Production)
 
 ```bash
-cd agentcore-gateway
-./scripts/deploy.sh
+cd agentcore-gateway/infrastructure
+npm install
+npx cdk bootstrap  # First time only
+npx cdk deploy --all -c region=us-west-2 -c centralAccountId=YOUR_ACCOUNT_ID
 ```
 
 ## Architecture Comparison
@@ -104,10 +106,10 @@ The AWS MCP Server **only supports SigV4 authentication**, but AgentCore Gateway
 │   ├── scripts/                           # Setup and test scripts
 │   └── tests/                             # Unit tests
 ├── agentcore-gateway/                     # AgentCore Gateway implementation
-│   ├── agent/                             # Runtime agent code
-│   ├── infrastructure/                    # CDK TypeScript stack
+│   ├── agent/                             # Runtime agent code + Dockerfile
+│   ├── infrastructure/                    # CDK TypeScript (6 stacks)
+│   │   └── lib/                           # Cognito, Lambda, Roles, ECR, Gateway, Runtime
 │   ├── lambda/                            # Lambda bridge function
-│   ├── scripts/                           # Deployment scripts
 │   └── tests/                             # Unit tests
 ├── ARCHITECTURE.md                        # Direct proxy architecture details
 ├── ARCHITECTURE_AGENTCOREGATEWAY.md       # Gateway + Lambda architecture
