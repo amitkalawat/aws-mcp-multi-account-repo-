@@ -93,6 +93,7 @@ agentcore-gateway/
 ├── README.md                              # This file
 ├── agent/
 │   ├── central_ops_agent.py               # Agent code (Bedrock Converse API)
+│   ├── Dockerfile                         # Container for AgentCore Runtime
 │   ├── .bedrock_agentcore.yaml            # Runtime configuration
 │   └── requirements.txt                   # Python dependencies
 ├── lambda/
@@ -104,7 +105,10 @@ agentcore-gateway/
 │   │   ├── cognito-stack.ts               # Cognito User Pool
 │   │   ├── lambda-stack.ts                # Bridge Lambda function
 │   │   ├── roles-stack.ts                 # Gateway and Runtime IAM roles
-│   │   └── member-account-stack.ts        # Member account target role
+│   │   ├── member-account-stack.ts        # Member account target role
+│   │   ├── ecr-stack.ts                   # ECR repository for agent container
+│   │   ├── gateway-stack.ts               # AgentCore Gateway and Lambda target
+│   │   └── runtime-stack.ts               # AgentCore Runtime and endpoint
 │   ├── config/
 │   │   └── accounts.json                  # Account configuration (gitignored)
 │   ├── package.json                       # Node.js dependencies
@@ -137,42 +141,45 @@ Create `infrastructure/config/accounts.json`:
 ### 2. Deploy Infrastructure
 
 ```bash
-cd agentcore-gateway
+cd agentcore-gateway/infrastructure
 
-# Set environment variables (optional, defaults shown)
-export ENVIRONMENT=dev
-export AWS_REGION=us-east-1
+# Install dependencies
+npm install
 
-# Run deployment script
-./scripts/deploy.sh
+# Bootstrap CDK (first time only)
+npx cdk bootstrap
+
+# Deploy all stacks (Cognito, Lambda, Roles, ECR, Gateway)
+npx cdk deploy --all \
+  -c region=us-west-2 \
+  -c centralAccountId=YOUR_ACCOUNT_ID
+
+# Note: AWS MCP Server is only available in us-east-1
+# The Lambda signs requests to us-east-1 regardless of deployment region
 ```
 
-The script will:
-1. Check prerequisites (AWS CLI, Node.js, credentials)
-2. Install CDK dependencies
-3. Bootstrap CDK (if needed)
-4. Deploy all stacks (Cognito, Lambda, Roles)
-5. Output CLI commands for manual Gateway/Runtime creation
+The CDK deployment creates:
+1. **Cognito** - User Pool and Client for JWT authentication
+2. **Lambda** - Bridge function for AWS MCP Server access
+3. **Roles** - Gateway and Runtime IAM roles
+4. **ECR** - Repository for agent container
+5. **Gateway** - AgentCore Gateway with Lambda target
 
-### 3. Create Gateway and Runtime (Manual)
+### 3. Deploy Runtime (Optional)
 
-After CDK deployment, run the CLI commands printed by the deploy script:
+To deploy the AgentCore Runtime with the containerized agent:
 
 ```bash
-# Create Gateway
-aws bedrock-agentcore-control create-gateway \
-  --gateway-name central-ops-gateway-dev \
-  --role-arn arn:aws:iam::111111111111:role/CentralOpsGatewayRole-dev
+# Build and push agent container
+cd ../agent
+aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com
+docker build -t central-ops-agent .
+docker tag central-ops-agent:latest $ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/central-ops-agent-dev:latest
+docker push $ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/central-ops-agent-dev:latest
 
-# Add Lambda target to Gateway
-aws bedrock-agentcore-control create-gateway-target \
-  --gateway-identifier central-ops-gateway-dev \
-  --name bridge-lambda \
-  --target-configuration '{"lambdaTargetConfiguration": {"lambdaArn": "arn:aws:lambda:us-east-1:111111111111:function:aws-mcp-bridge-dev"}}'
-
-# Deploy agent to Runtime
-cd agent
-agentcore deploy --execution-role arn:aws:iam::111111111111:role/CentralOpsRuntimeRole-dev
+# Deploy Runtime stack
+cd ../infrastructure
+npx cdk deploy CentralOps-Runtime-dev -c region=us-west-2 -c deployRuntime=true
 ```
 
 ### 4. Deploy Member Account Roles
@@ -256,21 +263,37 @@ npm test
 
 ### Integration Testing
 
-After deployment, test the agent:
+After deployment, test the Gateway directly:
 
 ```bash
-# Get Cognito token
+# Get stack outputs
+GATEWAY_URL=$(aws cloudformation describe-stacks --stack-name CentralOps-Gateway-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`GatewayUrl`].OutputValue' --output text)
+CLIENT_ID=$(aws cloudformation describe-stacks --stack-name CentralOps-Cognito-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)
+
+# Create test user (first time)
+aws cognito-idp admin-create-user --user-pool-id $POOL_ID --username test@example.com --temporary-password TempPass123! --message-action SUPPRESS
+aws cognito-idp admin-set-user-password --user-pool-id $POOL_ID --username test@example.com --password TestPass123! --permanent
+
+# Get Cognito ID token
 TOKEN=$(aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
-  --client-id $COGNITO_CLIENT_ID \
-  --auth-parameters USERNAME=$USER,PASSWORD=$PASS \
+  --client-id $CLIENT_ID \
+  --auth-parameters USERNAME=test@example.com,PASSWORD=TestPass123! \
   --query 'AuthenticationResult.IdToken' --output text)
 
-# Call agent
-curl -X POST https://$RUNTIME_ENDPOINT/invoke \
+# Test Gateway - list accounts
+curl -s -X POST "$GATEWAY_URL" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "List EC2 instances in account 222222222222"}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bridge-lambda___list_accounts","arguments":{}}}'
+
+# Test Gateway - query AWS MCP Server
+curl -s -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bridge-lambda___query","arguments":{"account_id":"YOUR_ACCOUNT_ID","tool_name":"aws___list_regions","arguments":{}}}}'
 ```
 
 ## CDK Stacks
@@ -287,12 +310,27 @@ curl -X POST https://$RUNTIME_ENDPOINT/invoke \
 
 ### RolesStack
 - Gateway service role (for Lambda invocation)
-- Runtime execution role (for Bedrock, Gateway, and Identity access)
+- Runtime execution role (for Bedrock, Gateway, ECR, and Identity access)
 
 ### MemberAccountStack
 - Target role for cross-account access (deploy in each member account)
 - ReadOnlyAccess managed policy
-- AWS MCP access permissions
+- AWS MCP access permissions (`InvokeMcp`, `CallReadOnlyTool`, `CallReadWriteTool`)
+
+### EcrStack
+- ECR repository for agent container images
+- Lifecycle policy to retain 5 most recent images
+
+### GatewayStack
+- AgentCore Gateway with MCP protocol
+- Lambda target with tool schema definitions
+- JWT authorizer configuration (Cognito)
+
+### RuntimeStack (conditional)
+- AgentCore Runtime with containerized agent
+- Runtime endpoint for invocations
+- Environment variables for Gateway URL and model configuration
+- Deployed when `-c deployRuntime=true` is passed
 
 ## Architecture Decision: Why Lambda Bridge?
 
@@ -344,6 +382,30 @@ If AssumeRole fails:
 - Verify target role exists in member account
 - Check trust policy includes central account and Lambda role ARN
 - Confirm Organization ID conditions match
+
+### AWS MCP Server Issues
+
+- **Region**: AWS MCP Server is only available in `us-east-1`. The Lambda signs requests to this region regardless of deployment region.
+- **CLI Command Format**: `aws___call_aws` requires `cli_command` parameter starting with "aws" (e.g., `"aws lambda list-functions"`)
+- **Session Initialization**: MCP protocol requires `initialize` before `tools/call` - the Lambda handles this automatically
+
+### CDK BedrockAgentCore Issues
+
+- **CDK Version**: Requires `aws-cdk-lib` version 2.236.0+ for `aws-bedrockagentcore` module
+- **protocolConfiguration**: Must be a string (`"HTTP"`), not an object
+- **Gateway attributes**: Use `attrGatewayIdentifier` (not `attrGatewayId`)
+
+### JWT Authentication Issues
+
+- **Cognito ID tokens**: Only configure `allowedAudience` in Gateway authorizer (ID tokens have `aud` but not `client_id` claim)
+- **Access tokens**: If using access tokens, configure `allowedClients` instead
+- **Both configured**: If both `allowedAudience` AND `allowedClients` are set, BOTH must validate
+
+### Lambda Gateway Target Format
+
+When Gateway invokes Lambda, the event format is:
+- **event**: Tool arguments directly (e.g., `{"account_id": "123", "tool_name": "aws___list_regions"}`)
+- **context.client_context.custom**: Contains `bedrockAgentCoreToolName` with format `targetname___toolname`
 
 ## References
 
