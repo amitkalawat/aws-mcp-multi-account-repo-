@@ -380,6 +380,141 @@ curl -s -X POST "$GATEWAY_URL" \
 - Runtime role has DynamoDB read access for account lookups
 - Deployed when `-c deployRuntime=true` is passed
 
+## Adding New Accounts
+
+To add a new AWS account to the solution after initial deployment:
+
+### Step 1: Deploy Target Role in Member Account
+
+The new account needs the `CentralOpsTargetRole` IAM role that allows the Lambda to assume it.
+
+**Option A: Deploy via CDK** (requires credentials for member account)
+
+```bash
+cd agentcore-gateway/infrastructure
+
+# If deploying from central account with cross-account access
+npx cdk deploy CentralOps-MemberRole-dev \
+  --context centralAccountId=YOUR_CENTRAL_ACCOUNT_ID \
+  --profile MEMBER_ACCOUNT_PROFILE
+
+# Or using StackSets for multiple accounts (recommended for organizations)
+aws cloudformation create-stack-set \
+  --stack-set-name CentralOps-MemberRole \
+  --template-body file://member-role-template.yaml \
+  --permission-model SERVICE_MANAGED \
+  --auto-deployment Enabled=true
+```
+
+**Option B: Create role manually** (in member account AWS Console or CLI)
+
+```bash
+# Run this in the MEMBER account
+CENTRAL_ACCOUNT_ID="YOUR_CENTRAL_ACCOUNT_ID"
+LAMBDA_ROLE_ARN="arn:aws:iam::${CENTRAL_ACCOUNT_ID}:role/CentralOpsBridgeRole-dev"
+
+# Create the role with trust policy
+aws iam create-role \
+  --role-name CentralOpsTargetRole \
+  --assume-role-policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Principal\": {\"AWS\": \"${LAMBDA_ROLE_ARN}\"},
+      \"Action\": \"sts:AssumeRole\"
+    }]
+  }"
+
+# Attach ReadOnlyAccess policy
+aws iam attach-role-policy \
+  --role-name CentralOpsTargetRole \
+  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+
+# Add AWS MCP permissions (inline policy)
+aws iam put-role-policy \
+  --role-name CentralOpsTargetRole \
+  --policy-name MCPAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["aws-mcp:InvokeMcp", "aws-mcp:CallReadOnlyTool", "aws-mcp:CallReadWriteTool"],
+      "Resource": "*"
+    }]
+  }'
+```
+
+### Step 2: Register Account in DynamoDB
+
+Add the account to the DynamoDB table so the agent can discover it.
+
+```bash
+REGION="us-east-1"  # Same region as deployment
+TABLE_NAME="central-ops-accounts-dev"
+ACCOUNT_ID="NEW_ACCOUNT_ID"
+ACCOUNT_NAME="Friendly Name"
+ENVIRONMENT="prod"  # or dev, staging, etc.
+
+aws dynamodb put-item --table-name $TABLE_NAME --region $REGION --item "{
+  \"account_id\": {\"S\": \"${ACCOUNT_ID}\"},
+  \"name\": {\"S\": \"${ACCOUNT_NAME}\"},
+  \"environment\": {\"S\": \"${ENVIRONMENT}\"},
+  \"description\": {\"S\": \"Description of this account\"},
+  \"enabled\": {\"BOOL\": true}
+}"
+
+# Verify the account was added
+aws dynamodb scan --table-name $TABLE_NAME --region $REGION \
+  --query 'Items[*].{AccountID:account_id.S,Name:name.S,Environment:environment.S}' \
+  --output table
+```
+
+### Step 3: Test the New Account
+
+```bash
+# Get JWT token
+CLIENT_ID=$(aws cloudformation describe-stacks --stack-name CentralOps-Cognito-dev \
+  --region $REGION --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)
+
+TOKEN=$(aws cognito-idp initiate-auth \
+  --auth-flow USER_PASSWORD_AUTH \
+  --client-id $CLIENT_ID \
+  --auth-parameters USERNAME=test@example.com,PASSWORD=TestPass123! \
+  --region $REGION \
+  --query 'AuthenticationResult.IdToken' --output text)
+
+# Get Gateway URL
+GATEWAY_URL=$(aws cloudformation describe-stacks --stack-name CentralOps-Gateway-dev \
+  --region $REGION --query 'Stacks[0].Outputs[?OutputKey==`GatewayUrl`].OutputValue' --output text)
+
+# Test query to the new account
+curl -s -X POST "$GATEWAY_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"bridge-lambda___query\",\"arguments\":{\"account_id\":\"${ACCOUNT_ID}\",\"tool_name\":\"aws___list_regions\",\"arguments\":{}}}}" | jq .
+```
+
+### Removing an Account
+
+To remove an account from the solution:
+
+```bash
+# Delete from DynamoDB (soft delete - set enabled to false)
+aws dynamodb update-item --table-name $TABLE_NAME --region $REGION \
+  --key '{"account_id": {"S": "ACCOUNT_ID_TO_REMOVE"}}' \
+  --update-expression "SET enabled = :val" \
+  --expression-attribute-values '{":val": {"BOOL": false}}'
+
+# Or hard delete
+aws dynamodb delete-item --table-name $TABLE_NAME --region $REGION \
+  --key '{"account_id": {"S": "ACCOUNT_ID_TO_REMOVE"}}'
+
+# Optionally, delete the target role in the member account
+aws iam delete-role-policy --role-name CentralOpsTargetRole --policy-name MCPAccess
+aws iam detach-role-policy --role-name CentralOpsTargetRole --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+aws iam delete-role --role-name CentralOpsTargetRole
+```
+
 ## Architecture Decision: Why Lambda Bridge?
 
 AgentCore Gateway supports multiple target types with different authentication options:
