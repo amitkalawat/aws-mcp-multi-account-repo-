@@ -4,6 +4,7 @@ import * as cdk from 'aws-cdk-lib';
 import { CognitoStack } from '../lib/cognito-stack';
 import { LambdaStack } from '../lib/lambda-stack';
 import { RolesStack } from '../lib/roles-stack';
+import { MemberAccountStack } from '../lib/member-account-stack';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -42,3 +43,12 @@ const rolesStack = new RolesStack(app, `CentralOps-Roles-${environment}`, {
   env,
 });
 rolesStack.addDependency(lambdaStack);
+
+// Member Account Stack (target role for same account setup)
+// Deploy this to each member account that needs to be queried
+const memberStack = new MemberAccountStack(app, `CentralOps-MemberRole-${environment}`, {
+  centralAccountId: '878687028155',
+  bridgeLambdaRoleArn: lambdaStack.bridgeLambdaRole.roleArn,
+  env,
+});
+memberStack.addDependency(lambdaStack);

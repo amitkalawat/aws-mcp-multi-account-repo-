@@ -21,9 +21,13 @@ export class MemberAccountStack extends cdk.Stack {
       ],
     });
 
-    // AWS MCP access
+    // AWS MCP access (read-only and read-write tools)
     this.targetRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['aws-mcp:InvokeMcp', 'aws-mcp:CallReadOnlyTool'],
+      actions: [
+        'aws-mcp:InvokeMcp',
+        'aws-mcp:CallReadOnlyTool',
+        'aws-mcp:CallReadWriteTool'
+      ],
       resources: ['*'],
     }));
 
