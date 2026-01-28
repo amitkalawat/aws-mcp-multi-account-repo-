@@ -1,33 +1,8 @@
 # Multi-Account AWS Operations Agent
 
-Centralized agent for querying AWS resources across multiple accounts using AWS MCP Server.
+Centralized agent for querying AWS resources across multiple accounts using AWS MCP Server, deployed on AWS Bedrock AgentCore.
 
-## Two Implementation Approaches
-
-This repository contains two complete implementations:
-
-| Approach | Directory | Best For |
-|----------|-----------|----------|
-| **Direct MCP Proxy** | `direct-proxy/` | Local development, single agent, simpler setup |
-| **AgentCore Gateway** | `agentcore-gateway/` | Production, managed infrastructure, enterprise |
-
-### Direct MCP Proxy (`direct-proxy/`)
-
-Agent bundles `mcp-proxy-for-aws` to handle SigV4 signing locally.
-
-```
-Agent → mcp-proxy-for-aws → AWS MCP Server → Member Accounts
-```
-
-**Pros:** Simple, no extra AWS resources, works locally
-**Cons:** Proxy bundled with agent, no centralized auth
-
-[→ Direct Proxy Documentation](direct-proxy/README.md)
-
-### AgentCore Gateway (`agentcore-gateway/`)
-
-Full AgentCore stack: Runtime Agent + Gateway + Lambda Bridge + DynamoDB for account management.
-Infrastructure fully automated with AWS CDK (TypeScript) - single command deploys all 7 stacks.
+## Architecture
 
 ```
                     ┌─────────────┐
@@ -38,108 +13,143 @@ Infrastructure fully automated with AWS CDK (TypeScript) - single command deploy
 Runtime (Agent) → Gateway → Lambda → AWS MCP Server → Member Accounts
 ```
 
-**Pros:** Managed infrastructure, auto-scaling, dynamic account management, production-ready
-**Cons:** More AWS resources, Lambda cold starts
+Full AgentCore stack: Runtime Agent + Gateway + Lambda Bridge + DynamoDB for account management.
+Infrastructure fully automated with AWS CDK (TypeScript) - single command deploys all 7 stacks.
 
-[→ AgentCore Gateway Documentation](agentcore-gateway/README.md)
+**Features:**
+- Managed infrastructure with auto-scaling
+- JWT authentication via Cognito
+- Dynamic account management via DynamoDB
+- React frontend with streaming responses
 
 ## Quick Start
 
-### Direct Proxy (Development)
+### Prerequisites
 
-```bash
-cd direct-proxy
-./scripts/verify_prerequisites.sh
-source .venv/bin/activate
-pytest tests/ -v
-python3 scripts/test_integration.py
-```
+- AWS CLI configured with appropriate permissions
+- Node.js 18+ and npm
+- Python 3.11+ with virtual environment
+- Docker (for agent container builds)
 
-### AgentCore Gateway (Production)
+### Deploy Infrastructure
 
 ```bash
 cd agentcore-gateway/infrastructure
 npm install
 npx cdk bootstrap  # First time only
-npx cdk deploy --all -c region=us-west-2 -c centralAccountId=YOUR_ACCOUNT_ID
+npx cdk deploy --all --region us-east-1
 ```
 
-## Architecture Comparison
+### Build and Deploy Agent
 
-| Feature | Direct Proxy | AgentCore Stack |
-|---------|--------------|-----------------|
-| SigV4 for MCP | Via bundled proxy | Via Lambda |
-| Agent Runtime | Local/Container | AgentCore Runtime |
-| Auth | AWS credentials | JWT + Workload Identity |
-| Infrastructure | None | CDK (TypeScript) |
-| Cold Start | No | Yes (mitigatable) |
-| Managed Infrastructure | No | Yes |
-| Cross-Account | STS AssumeRole | STS AssumeRole |
-| Best Environment | Local/Container | AWS Production |
+```bash
+# Build container
+cd agentcore-gateway/agent
+docker build -t central-ops-agent .
 
-## Key Constraint: AWS MCP Server Requires SigV4
+# Push to ECR (get repo URL from stack outputs)
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-1.amazonaws.com
+docker tag central-ops-agent:latest <account>.dkr.ecr.us-east-1.amazonaws.com/central-ops-agent-dev:latest
+docker push <account>.dkr.ecr.us-east-1.amazonaws.com/central-ops-agent-dev:latest
 
-The AWS MCP Server **only supports SigV4 authentication**, but AgentCore Gateway **doesn't support SigV4 for MCP targets**. Our solutions work around this:
+# Deploy Runtime
+cd ../infrastructure
+npx cdk deploy -c deployRuntime=true CentralOps-Runtime-dev
+```
 
-- **Direct Proxy**: Bundle `mcp-proxy-for-aws` in agent container
-- **Gateway**: Use Lambda target (supports SigV4) as bridge to AWS MCP Server
+### Deploy Frontend
 
-## Prerequisites
+```bash
+cd agentcore-gateway/frontend
+cp .env.example .env  # Fill in values from stack outputs
+npm install && npm run build
+./scripts/deploy.sh
+```
 
-- AWS Organizations with 2-10 member accounts
-- Central operations account for deploying the agent
-- IAM roles in each member account (deployed via StackSet)
-- Bedrock model access (Claude 3.5 Sonnet)
+## Available Tools
+
+The agent exposes AWS MCP Server tools through the Gateway:
+
+### Account-Specific Tools (require account_id)
+- `aws___call_aws` - Execute AWS CLI commands in target account
+- `aws___list_regions` - List available AWS regions
+
+### Global Tools (no account_id needed)
+- `aws___search_documentation` - Search AWS docs
+- `aws___read_documentation` - Read specific doc pages
+- `aws___retrieve_agent_sop` - Get AWS task SOPs
+- `aws___suggest_aws_commands` - Get CLI help
+- `aws___recommend` - Get doc recommendations
 
 ## Example Queries
 
 ```
 "List all EC2 instances in the production account"
+"Search AWS documentation for Lambda best practices"
+"Get the SOP for setting up a VPC"
 "Show me S3 buckets across all accounts"
-"What Lambda functions exist in staging?"
-"Describe EKS clusters in account 222222222222"
-"How many RDS instances are running in each account?"
+"How do I use the aws s3 sync command?"
 ```
 
 ## Project Structure
 
 ```
 ├── README.md                              # This file
-├── direct-proxy/                          # Direct MCP Proxy implementation
-│   ├── agent/                             # Agent code with MCP client
-│   ├── infrastructure/                    # Account registry, IAM templates
-│   ├── scripts/                           # Setup and test scripts
-│   └── tests/                             # Unit tests
-├── agentcore-gateway/                     # AgentCore Gateway implementation
+├── agentcore-gateway/                     # Main implementation
 │   ├── agent/                             # Runtime agent code + Dockerfile
+│   ├── frontend/                          # React frontend (Vite + TailwindCSS)
 │   ├── infrastructure/                    # CDK TypeScript (7 stacks)
 │   │   └── lib/                           # DynamoDB, Cognito, Lambda, Roles, ECR, Gateway, Runtime
-│   ├── lambda/                            # Lambda bridge function
+│   ├── lambda/                            # Lambda bridge for AWS MCP Server
 │   └── tests/                             # Unit tests
-├── ARCHITECTURE.md                        # Direct proxy architecture details
-├── ARCHITECTURE_AGENTCOREGATEWAY.md       # Gateway + Lambda architecture
-└── ARCHITECTURE_SECURITY.md               # Enterprise IdP integration
+├── direct-proxy/                          # Alternative: Local development approach
+│   └── README.md                          # Direct proxy documentation
+├── ARCHITECTURE_AGENTCOREGATEWAY.md       # Gateway + Lambda architecture details
+└── ARCHITECTURE_SECURITY.md               # Enterprise IdP integration guide
 ```
+
+## Adding New Accounts
+
+1. Deploy `CentralOpsTargetRole` in member account:
+   ```bash
+   aws cloudformation deploy \
+     --template-file agentcore-gateway/infrastructure/member-account-role.yaml \
+     --stack-name CentralOpsTargetRole \
+     --parameter-overrides CentralAccountId=<central-account-id> \
+     --capabilities CAPABILITY_NAMED_IAM
+   ```
+
+2. Add to DynamoDB registry:
+   ```bash
+   aws dynamodb put-item \
+     --table-name central-ops-accounts-dev \
+     --region us-east-1 \
+     --item '{"account_id":{"S":"ACCOUNT_ID"},"name":{"S":"Account Name"},"environment":{"S":"prod"},"enabled":{"BOOL":true}}'
+   ```
 
 ## Security
 
 - **Read-only access**: All IAM roles use read-only permissions
 - **Cross-account**: Uses STS AssumeRole with Organization conditions
+- **JWT Authentication**: Cognito-based auth for Gateway and Runtime
 - **Audit**: CloudTrail logs all API calls with user attribution
-- **Authorization**: Group-based access control (with enterprise IdP)
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Direct proxy pattern with `mcp-proxy-for-aws` |
-| [ARCHITECTURE_AGENTCOREGATEWAY.md](ARCHITECTURE_AGENTCOREGATEWAY.md) | AgentCore Gateway with Lambda bridge |
-| [ARCHITECTURE_SECURITY.md](ARCHITECTURE_SECURITY.md) | Enterprise IdP integration (Okta, Azure AD, Identity Center) |
+| [agentcore-gateway/README.md](agentcore-gateway/README.md) | Detailed Gateway setup and configuration |
+| [ARCHITECTURE_AGENTCOREGATEWAY.md](ARCHITECTURE_AGENTCOREGATEWAY.md) | Technical architecture deep-dive |
+| [ARCHITECTURE_SECURITY.md](ARCHITECTURE_SECURITY.md) | Enterprise IdP integration (Okta, Azure AD) |
+| [direct-proxy/README.md](direct-proxy/README.md) | Alternative local development approach |
+
+## Alternative: Direct Proxy
+
+For local development or simpler deployments without AgentCore infrastructure, see the [direct-proxy/](direct-proxy/) implementation which uses `mcp-proxy-for-aws` subprocess calls.
 
 ## References
 
 - [AWS MCP Server Documentation](https://docs.aws.amazon.com/aws-mcp/latest/userguide/what-is-mcp-server.html)
-- [mcp-proxy-for-aws](https://github.com/aws/mcp-proxy-for-aws)
 - [Bedrock AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)
 - [AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html)
 

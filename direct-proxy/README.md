@@ -368,6 +368,10 @@ This implementation provides the core MCP client and account management. To buil
 4. **Containerize** - Docker image for consistent deployment
 5. **Consider AgentCore** - For production multi-tenant scenarios
 
+## Documentation
+
+For detailed architecture, IAM role templates, Identity Center (SSO) integration, and complete implementation code, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## References
 
 - [AWS MCP Server Documentation](https://docs.aws.amazon.com/aws-mcp/latest/userguide/what-is-mcp-server.html)
