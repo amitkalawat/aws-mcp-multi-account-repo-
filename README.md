@@ -5,16 +5,43 @@ Centralized agent for querying AWS resources across multiple accounts using AWS 
 ## Architecture
 
 ```
-                    ┌─────────────┐
-                    │  DynamoDB   │ (Account Registry)
-                    └──────┬──────┘
-                           │ Query accounts
-                           ▼
-Runtime (Agent) → Gateway → Lambda → AWS MCP Server → Member Accounts
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CENTRAL OPERATIONS ACCOUNT                          │
+│                                                                             │
+│  ┌──────────┐    ID Token    ┌─────────────┐    ID Token    ┌───────────┐  │
+│  │ Frontend │ ─────────────▶ │  AgentCore  │ ─────────────▶ │ AgentCore │  │
+│  │ (React)  │                │   Runtime   │                │  Gateway  │  │
+│  └──────────┘                │   (Agent)   │                └─────┬─────┘  │
+│       │                      └──────┬──────┘                      │        │
+│       │                             │                             │ SigV4  │
+│       │ OAuth                       │ Query accounts              │        │
+│       ▼                             ▼                             ▼        │
+│  ┌──────────┐               ┌─────────────┐               ┌───────────┐   │
+│  │ Cognito  │               │  DynamoDB   │               │  Lambda   │   │
+│  │ User Pool│               │ (Accounts)  │               │  Bridge   │   │
+│  └──────────┘               └─────────────┘               └─────┬─────┘   │
+│                                                                  │         │
+│       Same Cognito pool authenticates all three components       │ SigV4   │
+│                                                                  ▼         │
+│                                                           ┌───────────┐   │
+│                                                           │ AWS MCP   │   │
+│                                                           │ Server    │   │
+└───────────────────────────────────────────────────────────┴─────┬─────┴───┘
+                                                                  │
+                                          STS AssumeRole          │
+                    ┌─────────────────────────────────────────────┘
+                    ▼
+        ┌───────────────────────────────────────────────┐
+        │              MEMBER ACCOUNTS                   │
+        │  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
+        │  │  Prod   │  │ Staging │  │   Dev   │  ...   │
+        │  │  Role   │  │  Role   │  │  Role   │        │
+        │  └─────────┘  └─────────┘  └─────────┘        │
+        └───────────────────────────────────────────────┘
 ```
 
-Full AgentCore stack: Runtime Agent + Gateway + Lambda Bridge + DynamoDB for account management.
-Infrastructure fully automated with AWS CDK (TypeScript) - single command deploys all 7 stacks.
+Full AgentCore stack with 7 CDK stacks: Cognito, DynamoDB, Lambda, Roles, ECR, Gateway, Runtime.
+Infrastructure fully automated - single command deploys everything.
 
 **Features:**
 - Managed infrastructure with auto-scaling
