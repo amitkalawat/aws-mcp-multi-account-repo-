@@ -2,6 +2,20 @@
 
 Centralized agent for querying AWS resources across multiple accounts using AWS MCP Server, deployed on AWS Bedrock AgentCore.
 
+## Why?
+
+**AWS MCP Server** is a recently launched managed service that exposes 15,000+ AWS APIs through the Model Context Protocol (MCP). It enables AI agents to interact with AWS services using natural language - querying resources, searching documentation, and retrieving operational SOPs.
+
+**The Problem:** Most organizations run multiple AWS accounts (dev, staging, prod, security, shared services). Operations teams typically work from a central account and need visibility across all accounts for monitoring, compliance, and incident response. Manually switching contexts or running scripts across accounts is tedious.
+
+**This Solution:** We built an AI agent that can query any registered AWS account from a single interface. Using cross-account IAM role assumption with organization-scoped trust policies, the agent securely accesses member accounts without storing credentials.
+
+**Why AgentCore?**
+- **AgentCore Runtime** provides managed infrastructure for hosting AI agents with built-in scaling, monitoring, and JWT authentication
+- **AgentCore Gateway** acts as a unified tool layer, allowing agents to access enterprise tools (including AWS MCP Server via Lambda bridge) through a single authenticated endpoint
+
+The result: Ask questions like "List EC2 instances in production" or "Search AWS docs for Lambda best practices" and get answers across your entire AWS organization.
+
 ## Architecture
 
 ```
