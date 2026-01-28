@@ -70,6 +70,45 @@ The result: Ask questions like "List EC2 instances in production" or "Search AWS
 Full AgentCore stack with 7 CDK stacks: Cognito, DynamoDB, Lambda, Roles, ECR, Gateway, Runtime.
 Infrastructure fully automated - single command deploys everything.
 
+## Request Flow
+
+When a user asks *"List S3 buckets in the Production account"*:
+
+```
+1. USER → CLOUDFRONT → S3
+   User opens React app served via CloudFront/S3
+
+2. FRONTEND → COGNITO
+   User authenticates via Cognito Hosted UI (OAuth/PKCE)
+   ← Returns ID Token (JWT with aud=client_id)
+
+3. FRONTEND → RUNTIME
+   POST /invocations with prompt and ID Token
+   Runtime validates JWT against Cognito
+
+4. RUNTIME (Agent) → DYNAMODB
+   Agent queries account registry to resolve "Production"
+   ← Returns: { account_id: "123456789012", name: "Production", ... }
+
+5. RUNTIME (Agent) → GATEWAY
+   MCP tool call: bridge-lambda___query
+   Args: { account_id: "123456789012", tool_name: "aws___call_aws",
+           arguments: { cli_command: "aws s3 ls" } }
+
+6. GATEWAY → LAMBDA
+   Invokes Lambda bridge with tool arguments (SigV4 signed)
+
+7. LAMBDA → STS
+   AssumeRole to arn:aws:iam::123456789012:role/CentralOpsTargetRole
+   ← Returns temporary credentials for target account
+
+8. LAMBDA → AWS MCP SERVER
+   Calls AWS MCP Server with assumed credentials (SigV4)
+   ← Returns S3 bucket list from Production account
+
+9. Response flows back: Lambda → Gateway → Runtime → Frontend → User
+```
+
 **Features:**
 - Managed infrastructure with auto-scaling
 - JWT authentication via Cognito
