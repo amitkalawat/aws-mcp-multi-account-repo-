@@ -5,31 +5,44 @@ Centralized agent for querying AWS resources across multiple accounts using AWS 
 ## Architecture
 
 ```
+                    ┌──────────┐
+                    │   User   │
+                    │ (Browser)│
+                    └────┬─────┘
+                         │ HTTPS
+                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         CENTRAL OPERATIONS ACCOUNT                          │
 │                                                                             │
-│  ┌──────────┐    ID Token    ┌─────────────┐    ID Token    ┌───────────┐  │
-│  │ Frontend │ ─────────────▶ │  AgentCore  │ ─────────────▶ │ AgentCore │  │
-│  │ (React)  │                │   Runtime   │                │  Gateway  │  │
-│  └──────────┘                │   (Agent)   │                └─────┬─────┘  │
-│       │                      └──────┬──────┘                      │        │
-│       │                             │                             │ SigV4  │
-│       │ OAuth                       │ Query accounts              │        │
-│       ▼                             ▼                             ▼        │
-│  ┌──────────┐               ┌─────────────┐               ┌───────────┐   │
-│  │ Cognito  │               │  DynamoDB   │               │  Lambda   │   │
-│  │ User Pool│               │ (Accounts)  │               │  Bridge   │   │
-│  └──────────┘               └─────────────┘               └─────┬─────┘   │
-│                                                                  │         │
-│       Same Cognito pool authenticates all three components       │ SigV4   │
-│                                                                  ▼         │
-│                                                           ┌───────────┐   │
-│                                                           │ AWS MCP   │   │
-│                                                           │ Server    │   │
-└───────────────────────────────────────────────────────────┴─────┬─────┴───┘
-                                                                  │
-                                          STS AssumeRole          │
-                    ┌─────────────────────────────────────────────┘
+│                    ┌────────────┐         ┌──────────┐                      │
+│                    │ CloudFront │ ──────▶ │    S3    │                      │
+│                    │   (CDN)    │         │ (React)  │                      │
+│                    └─────┬──────┘         └──────────┘                      │
+│                          │                                                  │
+│                          │ ID Token                                         │
+│                          ▼                                                  │
+│  ┌──────────┐      ┌─────────────┐    ID Token    ┌───────────┐            │
+│  │ Cognito  │◀────▶│  AgentCore  │ ─────────────▶ │ AgentCore │            │
+│  │ User Pool│ OAuth│   Runtime   │                │  Gateway  │            │
+│  └──────────┘      │   (Agent)   │                └─────┬─────┘            │
+│                    └──────┬──────┘                      │                   │
+│                           │                             │ SigV4             │
+│                           │ Query accounts              │                   │
+│                           ▼                             ▼                   │
+│                    ┌─────────────┐               ┌───────────┐             │
+│                    │  DynamoDB   │               │  Lambda   │             │
+│                    │ (Accounts)  │               │  Bridge   │             │
+│                    └─────────────┘               └─────┬─────┘             │
+│                                                        │                    │
+│       Same Cognito pool authenticates Runtime & Gateway│ SigV4             │
+│                                                        ▼                    │
+│                                                 ┌───────────┐              │
+│                                                 │ AWS MCP   │              │
+│                                                 │ Server    │              │
+└─────────────────────────────────────────────────┴─────┬─────┴──────────────┘
+                                                        │
+                                    STS AssumeRole      │
+                    ┌───────────────────────────────────┘
                     ▼
         ┌───────────────────────────────────────────────┐
         │              MEMBER ACCOUNTS                   │
