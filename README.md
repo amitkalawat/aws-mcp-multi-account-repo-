@@ -12,59 +12,87 @@ Centralized agent for querying AWS resources across multiple accounts using AWS 
 
 **Why AgentCore?**
 - **AgentCore Runtime** provides managed infrastructure for hosting AI agents with built-in scaling, monitoring, and JWT authentication
-- **AgentCore Gateway** acts as a unified tool layer, allowing agents to access enterprise tools (including AWS MCP Server via Lambda bridge) through a single authenticated endpoint
+- **AgentCore Gateway** acts as a unified tool layer, allowing agents to access enterprise tools through a single authenticated endpoint
+
+**Why Lambda Bridge?** AgentCore Gateway supports OAuth for outbound MCP calls, but AWS MCP Server requires SigV4 authentication. Since Gateway can't sign requests with SigV4, we use a Lambda function as a bridge. The Gateway invokes Lambda (which it can do natively), and Lambda handles SigV4 signing to call AWS MCP Server. This pattern also enables cross-account credential switching - Lambda assumes roles in target accounts before making MCP calls.
 
 The result: Ask questions like "List EC2 instances in production" or "Search AWS docs for Lambda best practices" and get answers across your entire AWS organization.
 
 ## Architecture
 
 ```
-                    ┌──────────┐
-                    │   User   │
-                    │ (Browser)│
-                    └────┬─────┘
-                         │ HTTPS
-                         ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         CENTRAL OPERATIONS ACCOUNT                          │
-│                                                                             │
-│                    ┌────────────┐         ┌──────────┐                      │
-│                    │ CloudFront │ ──────▶ │    S3    │                      │
-│                    │   (CDN)    │         │ (React)  │                      │
-│                    └─────┬──────┘         └──────────┘                      │
-│                          │                                                  │
-│                          │ ID Token                                         │
-│                          ▼                                                  │
-│  ┌──────────┐      ┌─────────────┐    ID Token    ┌───────────┐            │
-│  │ Cognito  │◀────▶│  AgentCore  │ ─────────────▶ │ AgentCore │            │
-│  │ User Pool│ OAuth│   Runtime   │                │  Gateway  │            │
-│  └──────────┘      │   (Agent)   │                └─────┬─────┘            │
-│                    └──────┬──────┘                      │                   │
-│                           │                             │ SigV4             │
-│                           │ Query accounts              │                   │
-│                           ▼                             ▼                   │
-│                    ┌─────────────┐               ┌───────────┐             │
-│                    │  DynamoDB   │               │  Lambda   │             │
-│                    │ (Accounts)  │               │  Bridge   │             │
-│                    └─────────────┘               └─────┬─────┘             │
-│                                                        │                    │
-│       Same Cognito pool authenticates Runtime & Gateway│ SigV4             │
-│                                                        ▼                    │
-│                                                 ┌───────────┐              │
-│                                                 │ AWS MCP   │              │
-│                                                 │ Server    │              │
-└─────────────────────────────────────────────────┴─────┬─────┴──────────────┘
-                                                        │
-                                    STS AssumeRole      │
-                    ┌───────────────────────────────────┘
-                    ▼
-        ┌───────────────────────────────────────────────┐
-        │              MEMBER ACCOUNTS                   │
-        │  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
-        │  │  Prod   │  │ Staging │  │   Dev   │  ...   │
-        │  │  Role   │  │  Role   │  │  Role   │        │
-        │  └─────────┘  └─────────┘  └─────────┘        │
-        └───────────────────────────────────────────────┘
+                                    ┌─────────────┐
+                                    │    USER     │
+                                    │  (Browser)  │
+                                    └──────┬──────┘
+                                           │
+                                           ▼ HTTPS
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                            CENTRAL OPERATIONS ACCOUNT                            │
+│                                                                                  │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │                           FRONTEND HOSTING                              │   │
+│    │                                                                         │   │
+│    │              ┌──────────────┐          ┌──────────────┐                 │   │
+│    │              │  CloudFront  │ ───────▶ │   S3 Bucket  │                 │   │
+│    │              │    (CDN)     │          │  (React App) │                 │   │
+│    │              └──────┬───────┘          └──────────────┘                 │   │
+│    └─────────────────────┼───────────────────────────────────────────────────┘   │
+│                          │                                                       │
+│                          ▼ API Call + JWT                                        │
+│    ┌─────────────────────────────────────────────────────────────────────────┐   │
+│    │                          AGENT LAYER                                    │   │
+│    │                                                                         │   │
+│    │    ┌────────────┐         ┌───────────────────────────────────────┐     │   │
+│    │    │  Cognito   │◀─OAuth─▶│          AgentCore Runtime            │     │   │
+│    │    │ User Pool  │         │              (Agent)                  │     │   │
+│    │    └────────────┘         │  ┌─────────────────────────────────┐  │     │   │
+│    │                           │  │ • Strands Agent + Claude Model  │  │     │   │
+│    │                           │  │ • MCP Client for Gateway        │  │     │   │
+│    │                           │  │ • Account resolution logic      │  │     │   │
+│    │                           │  └─────────────────────────────────┘  │     │   │
+│    │                           └───────────────┬───────────────────────┘     │   │
+│    └───────────────────────────────────────────┼─────────────────────────────┘   │
+│                                                │                                  │
+│                        ┌───────────────────────┴───────────────────────┐         │
+│                        ▼                                               ▼         │
+│    ┌─────────────────────────────────┐       ┌─────────────────────────────────┐ │
+│    │           DynamoDB              │       │        AgentCore Gateway        │ │
+│    │        (Account Registry)       │       │         (Tool Router)           │ │
+│    │  ┌───────────────────────────┐  │       └───────────────┬─────────────────┘ │
+│    │  │ account_id │ name │ env   │  │                       │                   │
+│    │  │ 1234...    │ Prod │ prod  │  │                       ▼ Invoke            │
+│    │  │ 5678...    │ Dev  │ dev   │  │       ┌─────────────────────────────────┐ │
+│    │  └───────────────────────────┘  │       │         Lambda Bridge           │ │
+│    └─────────────────────────────────┘       │  ┌───────────────────────────┐  │ │
+│                                              │  │ • STS AssumeRole          │  │ │
+│                                              │  │ • SigV4 Request Signing   │  │ │
+│                                              │  │ • MCP Session Management  │  │ │
+│                                              │  └───────────────────────────┘  │ │
+│                                              └───────────────┬─────────────────┘ │
+│                                                              │                   │
+│                                                              ▼ SigV4             │
+│                                              ┌─────────────────────────────────┐ │
+│                                              │        AWS MCP Server           │ │
+│                                              │   (15,000+ AWS APIs via MCP)    │ │
+│                                              └───────────────┬─────────────────┘ │
+└──────────────────────────────────────────────────────────────┼───────────────────┘
+                                                               │
+                                               STS AssumeRole  │
+                       ┌───────────────────────────────────────┘
+                       ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                              MEMBER ACCOUNTS                                     │
+│                                                                                  │
+│     ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐          │
+│     │    Production    │   │     Staging      │   │   Development    │   ...    │
+│     │  ┌────────────┐  │   │  ┌────────────┐  │   │  ┌────────────┐  │          │
+│     │  │ CentralOps │  │   │  │ CentralOps │  │   │  │ CentralOps │  │          │
+│     │  │ TargetRole │  │   │  │ TargetRole │  │   │  │ TargetRole │  │          │
+│     │  │ (ReadOnly) │  │   │  │ (ReadOnly) │  │   │  │ (ReadOnly) │  │          │
+│     │  └────────────┘  │   │  └────────────┘  │   │  └────────────┘  │          │
+│     └──────────────────┘   └──────────────────┘   └──────────────────┘          │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Full AgentCore stack with 7 CDK stacks: Cognito, DynamoDB, Lambda, Roles, ECR, Gateway, Runtime.
